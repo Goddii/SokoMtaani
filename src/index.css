@@ -1,0 +1,203 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Warm neutral ink scale (olive-tinted warm gray) */
+  --color-ink-50: #f7f7f4;
+  --color-ink-100: #eef0ea;
+  --color-ink-200: #dfe2d9;
+  --color-ink-300: #c6cbbf;
+  --color-ink-400: #a4aa9d;
+  --color-ink-500: #848b7d;
+  --color-ink-600: #666d60;
+  --color-ink-700: #4e544a;
+  --color-ink-800: #383d35;
+  --color-ink-900: #252a24;
+  --color-ink-950: #161a15;
+
+  /* Canvas: the app background */
+  --color-canvas: #f3f4f0;
+
+  /* Brand: deep market green (Kenya green, leaf undertone) */
+  --color-brand-50: #eef7f0;
+  --color-brand-100: #d9eee0;
+  --color-brand-200: #b4dcc2;
+  --color-brand-300: #86c49e;
+  --color-brand-400: #52a675;
+  --color-brand-500: #2c8a5b;
+  --color-brand-600: #16704a;
+  --color-brand-700: #105a3c;
+  --color-brand-800: #0d4a31;
+  --color-brand-900: #0a3d29;
+  --color-brand-950: #042116;
+
+  /* Semantic: success / open / synced */
+  --color-success-50: #e9f7ee;
+  --color-success-600: #16803e;
+  --color-success-700: #0f6a34;
+
+  /* Semantic: pending / amber */
+  --color-warning-50: #fdf3e2;
+  --color-warning-400: #e8a33d;
+  --color-warning-600: #b45309;
+  --color-warning-700: #92400e;
+
+  /* Semantic: danger / low stock / closed */
+  --color-danger-50: #fdeeec;
+  --color-danger-100: #fadcd8;
+  --color-danger-600: #d92d20;
+  --color-danger-700: #b42318;
+
+  --shadow-card: 0 1px 2px rgb(22 26 21 / 0.04);
+  --shadow-pop: 0 4px 6px -2px rgb(22 26 21 / 0.06), 0 12px 24px -6px rgb(22 26 21 / 0.12);
+  --shadow-docked: 0 -8px 24px -12px rgb(22 26 21 / 0.16);
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink-900 font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  ::selection {
+    background: var(--color-brand-200);
+    color: var(--color-brand-950);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  dialog {
+    border: none;
+    padding: 0;
+    background: transparent;
+    max-width: none;
+    max-height: none;
+    color: inherit;
+  }
+
+  dialog::backdrop {
+    background: rgb(16 20 15 / 0.45);
+  }
+
+  dialog[open] .modal-panel {
+    animation: modal-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes pop-in {
+    0% {
+      transform: scale(0.4);
+      opacity: 0;
+    }
+    60% {
+      transform: scale(1.12);
+    }
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  @keyframes sheet-up {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(-8px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes shake-x {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    20% {
+      transform: translateX(-7px);
+    }
+    40% {
+      transform: translateX(7px);
+    }
+    60% {
+      transform: translateX(-4px);
+    }
+    80% {
+      transform: translateX(4px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-ink-300) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: var(--color-ink-300);
+    border-radius: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
