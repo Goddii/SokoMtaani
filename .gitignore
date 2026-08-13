@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+node_modules/
+dist/
+.vite/
+__pycache__/
+*.pyc
+.venv/
+backend/.venv/
+*.db
+backend/instance/
+.DS_Store
