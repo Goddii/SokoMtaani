@@ -14,3 +14,8 @@ backend/.venv/
 *.db
 backend/instance/
 .DS_Store
+
+*.md
+settings.local.json
+hooks.json
+config.local.json
