@@ -21,10 +21,13 @@ depends_on = None
 
 
 def upgrade():
+    #explicitly create the Postgres ENUM type first
+    pricing_mode_enum = sa.Enum('weighed', 'counted', name='pricingmode')
+    pricing_mode_enum.create(op.get_bind(), checkfirst=True)
     # pricing_mode on products — default 'weighed', every existing product keeps it
     op.add_column(
         'products',
-        sa.Column('pricing_mode', sa.Enum('weighed', 'counted', name='pricingmode'), server_default='weighed', nullable=False),
+        sa.Column('pricing_mode', pricing_mode_enum, server_default='weighed', nullable=False),
     )
 
     # New unified price_buttons table
@@ -79,3 +82,6 @@ def downgrade():
 
     with op.batch_alter_table('products', schema=None) as batch_op:
         batch_op.drop_column('pricing_mode')
+
+    # Drop the ENUM type if no other columns are using it
+    sa.Enum(name='pricingmode').drop(op.get_bind(), checkfirst=True)    
