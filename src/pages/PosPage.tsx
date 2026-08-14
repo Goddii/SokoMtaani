@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Check, LogOut, Receipt, Search, ShoppingBag, X, WifiOff } from 'lucide-react'
+import { ArrowLeft, BarChart3, Check, LogOut, Receipt, Search, ShoppingBag, X, WifiOff } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { useOffline } from '../hooks/useOffline'
 import { isOwner } from '../lib/auth'
@@ -398,13 +398,23 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
             <Receipt className="size-5" aria-hidden />
           </button>
           {isOwner() ? (
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="hidden rounded-lg px-3 py-2 text-sm font-semibold text-ink-600 transition-colors hover:bg-ink-100 lg:block"
-            >
-              Dashboard
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => navigate('/sales')}
+                className="hidden items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-ink-600 transition-colors hover:bg-ink-100 lg:flex"
+              >
+                <BarChart3 className="size-4" aria-hidden />
+                Sales
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/')}
+                className="hidden rounded-lg px-3 py-2 text-sm font-semibold text-ink-600 transition-colors hover:bg-ink-100 lg:block"
+              >
+                Dashboard
+              </button>
+            </>
           ) : (
             <button
               type="button"
