@@ -24,7 +24,7 @@ from app.extensions import db, hash_pin  # noqa: E402
 from app.models.attendant import Attendant, ShopRole  # noqa: E402
 from app.models.product import Product, BaseUnit, Category, PricingMode  # noqa: E402
 from app.models.stock_batch import StockBatch, BatchStatus  # noqa: E402
-from app.utils.timezone import business_day_bounds, shop_date_of  # noqa: E402
+from app.utils.timezone import business_day_bounds, shop_date_of, shop_now, today_shop_date  # noqa: E402
 from flask_jwt_extended import create_access_token  # noqa: E402
 
 
@@ -164,29 +164,33 @@ def test_dashboard_series_groups_by_kenya_day_and_excludes_voided():
         attendant, product, _ = _seed_rice()
         token = _mk_token(attendant.id)
 
-        # 21:30Z Aug 11 == 00:30 EAT Aug 12; 10:00Z Aug 12 == 13:00 EAT Aug 12.
-        _sync_one(app, token, "late", product, attendant, "2026-08-11T21:30:00+00:00")
-        _sync_one(app, token, "afternoon", product, attendant, "2026-08-12T10:00:00+00:00")
+        # Sale timestamps are relative to today so the test never goes stale:
+        # 21:30Z on the previous Kenya day == 00:30 EAT today;
+        # 10:00Z today == 13:00 EAT today. days=3 always covers both.
+        day2 = today_shop_date()
+        day1 = (shop_now().date() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _sync_one(app, token, "late", product, attendant, f"{day1}T21:30:00+00:00")
+        _sync_one(app, token, "afternoon", product, attendant, f"{day2}T10:00:00+00:00")
 
         with app.test_client() as client:
             body = client.get("/api/dashboard/series?days=3", headers={"Authorization": f"Bearer {token}"}).get_json()
         series = body["series"]
         checks.check(len(series) == 3, f"3 zero-filled buckets ({len(series)})")
-        aug12 = next(p for p in series if p["date"] == "2026-08-12")
-        checks.check(aug12["sale_count"] == 2, f"both EAT Aug-12 sales grouped ({aug12})")
-        checks.check(round(aug12["revenue"], 2) == 80.0, f"revenue 2 x 40.00 ({aug12['revenue']})")
-        aug11 = next(p for p in series if p["date"] == "2026-08-11")
-        checks.check(aug11["sale_count"] == 0, "Aug 11 empty")
+        today_p = next(p for p in series if p["date"] == day2)
+        checks.check(today_p["sale_count"] == 2, f"both EAT today sales grouped ({today_p})")
+        checks.check(round(today_p["revenue"], 2) == 80.0, f"revenue 2 x 40.00 ({today_p['revenue']})")
+        prev_p = next(p for p in series if p["date"] == day1)
+        checks.check(prev_p["sale_count"] == 0, f"{day1} empty")
 
         # Void one sale; the series must drop it.
         sale_id = None
         with app.test_client() as client:
-            rows = client.get("/api/sales?date=2026-08-12", headers={"Authorization": f"Bearer {token}"}).get_json()
+            rows = client.get(f"/api/sales?date={day2}", headers={"Authorization": f"Bearer {token}"}).get_json()
             sale_id = rows[0]["id"]
             client.post(f"/api/sales/{sale_id}/void", headers={"Authorization": f"Bearer {token}"})
             body2 = client.get("/api/dashboard/series?days=3", headers={"Authorization": f"Bearer {token}"}).get_json()
-        aug12b = next(p for p in body2["series"] if p["date"] == "2026-08-12")
-        checks.check(aug12b["sale_count"] == 1, f"voided sale excluded from series ({aug12b['sale_count']})")
+        today2b = next(p for p in body2["series"] if p["date"] == day2)
+        checks.check(today2b["sale_count"] == 1, f"voided sale excluded from series ({today2b['sale_count']})")
     _cleanup(tmpdir)
     checks.done()
 

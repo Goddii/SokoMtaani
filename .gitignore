@@ -19,3 +19,4 @@ backend/instance/
 settings.local.json
 hooks.json
 config.local.json
+!README.md
