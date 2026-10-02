@@ -29,8 +29,15 @@ def create_app(env: str = "development") -> Flask:
     cors.init_app(
         app,
         resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
-        supports_credentials=True,
     )
+
+    @jwt.token_in_blocklist_loader
+    def _is_attendant_revoked(_header, payload) -> bool:
+        """Treat tokens of deleted/deactivated attendants as revoked."""
+        from app.models.attendant import Attendant
+
+        attendant = db.session.get(Attendant, int(payload["sub"]))
+        return attendant is None or not attendant.active
 
     # ---------- Import models so Migrate can detect them ----------
     from app.models import (  # noqa: F401

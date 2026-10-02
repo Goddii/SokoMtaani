@@ -21,6 +21,7 @@ pins this; it fails if price_charged ever becomes Numeric(10,2) or anything
 rounds before the money math completes.
 """
 import csv
+import logging
 from datetime import datetime, timezone
 from io import StringIO
 
@@ -36,6 +37,11 @@ from app.models.stock_batch import StockBatch, BatchStatus
 from app.schemas.sale_schema import SaleSchema, SaleSyncItemSchema
 from app.utils.timezone import SHOP_TZ, business_day_bounds, db_ready_utc, today_shop_date
 from app.utils.unit_conversion import to_base_unit
+
+logger = logging.getLogger(__name__)
+
+# Upper bound on lines per /sync request — a till queue is a handful of carts.
+MAX_SYNC_ITEMS = 500
 
 sales_bp = Blueprint("sales", __name__)
 sale_schema = SaleSchema()
@@ -113,6 +119,7 @@ def _fifo_deduct(product: Product, qty_in_base_unit: float):
         StockBatch.query
         .filter_by(product_id=product.id, status=BatchStatus.open)
         .order_by(StockBatch.date_received.asc())
+        .with_for_update()  # row-lock on Postgres so concurrent syncs can't oversell
         .all()
     )
     total_available = sum(b.quantity_remaining for b in open_batches)
@@ -158,12 +165,17 @@ def sync_sales():
 
     if not isinstance(raw_items, list):
         return jsonify({"error": "'sales' must be an array."}), 422
+    if len(raw_items) > MAX_SYNC_ITEMS:
+        return jsonify({"error": f"Too many lines — send at most {MAX_SYNC_ITEMS} per request."}), 422
 
     results = []
     now = datetime.now(timezone.utc)
     claims = get_jwt()
 
     for raw in raw_items:
+        if not isinstance(raw, dict):
+            results.append({"client_uuid": "<unknown>", "status": "error", "reason": "Each sale line must be an object."})
+            continue
         uuid = raw.get("client_uuid", "<unknown>")
 
         # --- 1. Validate item schema ---
@@ -326,24 +338,25 @@ def sync_sales():
         )
         db.session.add(sale)
 
+        # Commit per line: a failure here rolls back only THIS line's pending
+        # changes (sale row + batch deduction). Lines already reported "synced"
+        # are already durable, so the client can safely drop them from its queue.
         try:
-            db.session.flush()  # get sale.id before committing the batch
-        except Exception as e:
+            db.session.flush()  # get sale.id
+            sale_id = sale.id
+            product.refresh_cost_cache()  # after batch changes
+            db.session.commit()
+        except Exception:
             db.session.rollback()
-            results.append({"client_uuid": uuid, "status": "error", "reason": str(e)})
+            logger.exception("sync: could not save line client_uuid=%s", uuid)
+            results.append({
+                "client_uuid": uuid,
+                "status": "error",
+                "reason": "Could not save this sale on the server — try again, or ask the owner to check.",
+            })
             continue
 
-        # Refresh product cost cache after batch changes
-        product.refresh_cost_cache()
-
-        results.append({"client_uuid": uuid, "status": "synced", "sale_id": sale.id})
-
-    # Commit everything that didn't individually fail
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": f"Database commit failed: {e}"}), 500
+        results.append({"client_uuid": uuid, "status": "synced", "sale_id": sale_id})
 
     return jsonify({"results": results}), 200
 
@@ -643,6 +656,10 @@ def daily_summary():
     q = Sale.query
     if not include_voided:
         q = q.filter(Sale.voided_at.is_(None))
+
+    # Non-owners only ever see their own takings — the shop-wide total is owner data.
+    if claims.get("role") != "owner":
+        q = q.filter(Sale.attendant_id == int(get_jwt_identity()))
 
     sales = q.filter(
         Sale.created_at >= db_ready_utc(start_utc),

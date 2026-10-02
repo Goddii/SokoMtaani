@@ -16,6 +16,9 @@ class Attendant(db.Model):
     pin_hash = db.Column(db.String(255), nullable=False)
     shop_role = db.Column(db.Enum(ShopRole), nullable=False, default=ShopRole.attendant)
     active = db.Column(db.Boolean, nullable=False, default=True)
+    # PIN brute-force protection — see app/utils/pin_lockout.py
+    failed_pin_attempts = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+    locked_until = db.Column(db.DateTime(timezone=True), nullable=True)
 
     # Relationships
     sales = db.relationship(

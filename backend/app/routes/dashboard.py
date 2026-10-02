@@ -8,6 +8,7 @@ from flask import current_app
 from app.extensions import db
 from app.models.product import Product, PricingMode
 from app.models.sale import Sale
+from app.utils.auth import is_owner, owner_required
 from app.utils.timezone import business_day_bounds, db_ready_utc, shop_date_of, shop_now, today_shop_date
 
 dashboard_bp = Blueprint("dashboard", __name__)
@@ -29,6 +30,20 @@ def _is_legacy_counted(sale) -> bool:
     )
 
 
+def _low_stock_products() -> list[dict]:
+    return [
+        {
+            "product_id": p.id,
+            "product_name": p.name,
+            "base_unit": p.base_unit.value,
+            "total_stock": round(p.total_stock, 4),
+            "reorder_threshold": p.reorder_threshold,
+        }
+        for p in Product.query.all()
+        if p.is_low_stock
+    ]
+
+
 @dashboard_bp.get("/summary")
 @jwt_required()
 def summary():
@@ -42,6 +57,18 @@ def summary():
     """
     today_str = today_shop_date()
     threshold = current_app.config.get("LOW_MARGIN_THRESHOLD", 0.10)
+
+    # Attendants only get stock alerts (the Topbar bell) — never revenue, cost,
+    # profit or margin, which are owner-only business data.
+    if not is_owner():
+        return jsonify({
+            "date": today_str,
+            "low_margin_threshold": threshold,
+            "today": {"sale_count": 0, "revenue": 0, "cost": 0, "profit": 0, "margin_pct": 0},
+            "per_product": [],
+            "low_margin_sales": [],
+            "low_stock_products": _low_stock_products(),
+        }), 200
 
     # ---------- Today's sales (Kenya business day) ----------
     start_utc, end_utc = business_day_bounds(today_str)
@@ -127,19 +154,7 @@ def summary():
         if not _is_legacy_counted(s) and s.margin_pct < threshold
     ]
 
-    # ---------- Low-stock products ----------
-    all_products = Product.query.all()
-    low_stock = [
-        {
-            "product_id": p.id,
-            "product_name": p.name,
-            "base_unit": p.base_unit.value,
-            "total_stock": round(p.total_stock, 4),
-            "reorder_threshold": p.reorder_threshold,
-        }
-        for p in all_products
-        if p.is_low_stock
-    ]
+    low_stock = _low_stock_products()
 
     return jsonify({
         "date": today_str,
@@ -158,7 +173,7 @@ def summary():
 
 
 @dashboard_bp.get("/series")
-@jwt_required()
+@owner_required
 def series():
     """
     GET /api/dashboard/series?days=N — server-aggregated daily revenue/profit.

@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt
 from marshmallow import ValidationError
 
 from app.extensions import db
+from app.utils.auth import owner_required
 from app.models.product import Product
 from app.models.stock_batch import StockBatch, BatchStatus
 from app.schemas.batch_schema import StockBatchSchema, BatchCreateSchema
@@ -16,15 +16,8 @@ batches_schema = StockBatchSchema(many=True)
 create_schema = BatchCreateSchema()
 
 
-def _require_owner():
-    claims = get_jwt()
-    if claims.get("role") != "owner":
-        return jsonify({"error": "Owner access required."}), 403
-    return None
-
-
 @batches_bp.get("")
-@jwt_required()
+@owner_required
 def list_batches():
     """GET /api/batches — list, filterable by ?product_id=&status="""
     q = StockBatch.query.join(Product)
@@ -42,16 +35,12 @@ def list_batches():
 
 
 @batches_bp.post("")
-@jwt_required()
+@owner_required
 def create_batch():
     """
     POST /api/batches — new bulk purchase entry.
     Auto-computes cost_per_base_unit = total_cost / bulk_quantity.
     """
-    err = _require_owner()
-    if err:
-        return err
-
     try:
         data = create_schema.load(request.get_json(silent=True) or {})
     except ValidationError as e:
@@ -89,13 +78,9 @@ def create_batch():
 
 
 @batches_bp.put("/<int:batch_id>/close")
-@jwt_required()
+@owner_required
 def close_batch(batch_id: int):
     """PUT /api/batches/<id>/close — manually close a batch."""
-    err = _require_owner()
-    if err:
-        return err
-
     batch = db.get_or_404(StockBatch, batch_id)
 
     if batch.status == BatchStatus.closed:

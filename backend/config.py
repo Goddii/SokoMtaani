@@ -16,7 +16,7 @@ class Config:
     # refuses to start in production unless both are set via the environment.
     SECRET_KEY = os.getenv("SECRET_KEY") or "dev-flask-secret-change-me"
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or "dev-jwt-secret-change-me"
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=12)
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
     JWT_TOKEN_LOCATION = ["headers"]
 
     # SQLAlchemy
