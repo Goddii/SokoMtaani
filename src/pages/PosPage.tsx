@@ -1,98 +1,35 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, BarChart3, Check, LogOut, Receipt, Search, ShoppingBag, X, WifiOff } from 'lucide-react'
-import { useStore } from '../lib/store'
 import { useOffline } from '../hooks/useOffline'
 import { isOwner } from '../lib/auth'
-import { pushSaleToServer } from '../lib/sync'
 import { fmtKES } from '../lib/format'
-import { productsApi, attendantsApi, type ApiAttendant, type ApiPriceButton, type ApiProduct } from '../lib/api'
-import { newSaleId } from '../lib/id'
-import type { Category, PaymentMethod } from '../lib/types'
-import { CartPanel, type CartLine } from '../components/pos/CartPanel'
+import type { ApiProduct } from '../lib/api'
+import type { PaymentMethod } from '../lib/types'
+import { CartPanel } from '../components/pos/CartPanel'
 import { ProductTile } from '../components/pos/ProductTile'
 import { PinModal } from '../components/pos/PinModal'
 import { ButtonPicker } from '../components/pos/ButtonPicker'
 import { MySalesPanel } from '../components/pos/MySalesPanel'
-import { CATEGORY_META, lineBaseQty, lineTotal, lineUnitPrice, stepFor } from '../components/pos/posMeta'
+import { OfflinePill } from '../components/pos/OfflinePill'
+import { stepFor } from '../components/pos/posMeta'
 import { cn } from '../lib/utils'
-
-type CatFilter = 'all' | Category
-
-const CAT_FILTERS: Array<{ value: CatFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'produce', label: CATEGORY_META.produce.label },
-  { value: 'dry', label: CATEGORY_META.dry.label },
-  { value: 'packaging', label: CATEGORY_META.packaging.label },
-]
-
-function loadLastAttendant(): number | null {
-  try {
-    const raw = localStorage.getItem('soko-mtaani/last-attendant')
-    const n = raw ? parseInt(raw, 10) : NaN
-    return Number.isFinite(n) ? n : null
-  } catch {
-    return null
-  }
-}
-
-function saveLastAttendant(id: number) {
-  try {
-    localStorage.setItem('soko-mtaani/last-attendant', String(id))
-  } catch {
-    // ignore
-  }
-}
-
-/**
- * One row in the in-memory cart — sold at flat rate or via a fixed-price button.
- *
- * `count` means:
- * - button line: how many times that selling button is being sold ("1 tomato
- *   @ KSh5" x3). The base-unit qty it consumes is `amount × count`. A line
- *   never exists below count 1 — decrementing to 0 removes it.
- * - flat-rate line: the quantity in the product's base unit.
- */
-interface CartLineState {
-  id: number
-  productId: number
-  count: number
-  button?: ApiPriceButton
-}
-
-const nowIso = () => new Date().toISOString()
-
-/**
- * Max times a button can be sold against a cart snapshot: stock on hand minus
- * what every OTHER line of the product already holds (each sold at its own
- * base-unit qty), divided by the button's amount. null for legacy buttons
- * without an amount — they never deduct stock, so there is no cap.
- */
-function maxCountIn(
-  cart: CartLineState[],
-  product: ApiProduct,
-  button: ApiPriceButton,
-  excludeButtonId?: number,
-): number | null {
-  const amount = button.kg_amount
-  if (amount == null) return null
-  const otherBase = cart
-    .filter((l) => l.productId === product.id && l.button?.id !== (excludeButtonId ?? button.id))
-    .reduce((s, l) => s + lineBaseQty(l.count, l.button), 0)
-  const remaining = Math.max(0, product.total_stock - otherBase)
-  return Math.floor(remaining / amount)
-}
+import { CAT_FILTERS, type CatFilter } from './pos/posHelpers'
+import { useCart } from './pos/useCart'
+import { useCheckout } from './pos/useCheckout'
+import { useCheckoutToast } from './pos/useCheckoutToast'
+import { useOfflineSync } from './pos/useOfflineSync'
+import { usePosData } from './pos/usePosData'
 
 export function PosPage({ onLogout }: { onLogout?: () => void }) {
-  const { state, dispatch } = useStore()
   const { offline } = useOffline()
   const navigate = useNavigate()
 
-  const [products, setProducts] = useState<ApiProduct[]>([])
-  const [attendants, setAttendants] = useState<ApiAttendant[]>([])
-  const [loading, setLoading] = useState(true)
+  const { products, attendants, loading, loadData } = usePosData()
+  const { pendingCount } = useOfflineSync(offline, loadData)
+  const cart = useCart(products)
+  const { toast, showToast } = useCheckoutToast()
 
-  const [cart, setCart] = useState<CartLineState[]>([])
   const [payment, setPayment] = useState<PaymentMethod>('mpesa')
   const [query, setQuery] = useState('')
   const [catFilter, setCatFilter] = useState<CatFilter>('all')
@@ -100,85 +37,20 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
   const [pinOpen, setPinOpen] = useState(false)
   const [buttonProduct, setButtonProduct] = useState<ApiProduct | null>(null)
   const [mySalesOpen, setMySalesOpen] = useState(false)
-  const [lastAttendant, setLastAttendant] = useState<number | null>(loadLastAttendant)
-  const nextLineId = useRef(0)
-
-  // Checkout confirmation toast — ONLINE shows only after the server ACKs the
-  // sale; OFFLINE shows as soon as the sale is persisted locally as pending.
-  const [toast, setToast] = useState<{ kind: 'online' | 'offline'; total: number; itemCount: number } | null>(null)
-  const toastTimer = useRef<number | null>(null)
-  const syncInFlight = useRef(false)
-  const syncAgain = useRef(false)
-  const [syncTick, setSyncTick] = useState(0)
   const [nowMs] = useState(() => Date.now())
 
-  const showToast = useCallback((t: NonNullable<typeof toast>) => {
-    setToast(t)
-    if (toastTimer.current) window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(null), 1400)
-  }, [])
-
-  useEffect(() => () => {
-    if (toastTimer.current) window.clearTimeout(toastTimer.current)
-  }, [])
-
-  const loadData = useCallback(async () => {
-    const [pRes, aRes] = await Promise.all([productsApi.list(), attendantsApi.list()])
-    if (pRes.ok) setProducts(pRes.data)
-    if (aRes.ok) setAttendants(aRes.data.filter((a) => a.active))
-    setLoading(false)
-  }, [])
-
-  useEffect(() => {
-    loadData()
-  }, [loadData])
-
-  // When the connection returns, push any sales queued while offline.
-  // The server dedups by client_uuid, so a concurrent manual sync is safe.
-  useEffect(() => {
-    if (offline) return
-    const pendingSales = state.sales.filter((s) => s.syncStatus === 'pending')
-    if (!pendingSales.length) return
-    // One push at a time: every dispatch below changes state.sales and
-    // re-fires this effect. If a push is already running, note that and
-    // re-run once it finishes so a sale queued meanwhile is not stranded.
-    if (syncInFlight.current) {
-      syncAgain.current = true
-      return
-    }
-    syncInFlight.current = true
-    Promise.all(pendingSales.map((sale) => pushSaleToServer(sale))).then((outcomes) => {
-      if (outcomes.every((o) => o.ok)) {
-        dispatch({ type: 'SYNC_ALL', now: new Date().toISOString() })
-        dispatch({ type: 'CLEAR_SYNCED' })
-        loadData()
-        return
-      }
-      // Record the server's verdict on each rejected sale so My Sales can
-      // explain it. Only a rejection carries a verdict — network failures
-      // (empty errors) leave the sale and any prior reason untouched. And
-      // skip unchanged reasons: that keeps this effect from re-firing on its
-      // own dispatch and hammering the server in a retry loop (a genuinely
-      // blocked sale keeps the same reason, so after one dispatch the state
-      // matches and the loop stops).
-      pendingSales.forEach((sale, i) => {
-        const reason = outcomes[i].errors[0]
-        if (reason !== undefined && sale.syncError !== reason) {
-          dispatch({ type: 'MARK_PENDING', id: sale.id, reason })
-        }
-      })
-    })
-      // A thrown network error leaves the sales pending; the next state change
-      // or reconnect retries them.
-      .catch(() => {})
-      .finally(() => {
-        syncInFlight.current = false
-        if (syncAgain.current) {
-          syncAgain.current = false
-          setSyncTick((t) => t + 1)
-        }
-      })
-  }, [offline, state.sales, dispatch, loadData, syncTick])
+  const { completeCharge, lastAttendant } = useCheckout({
+    lines: cart.lines,
+    total: cart.cartTotal,
+    payment,
+    offline,
+    loadData,
+    showToast,
+    onRecorded: () => {
+      cart.clearCart()
+      setCartOpen(false)
+    },
+  })
 
   const visibleProducts = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -188,78 +60,6 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [products, catFilter, query])
 
-  const lines: CartLine[] = useMemo(
-    () =>
-      cart
-        .map((l): CartLine | null => {
-          const product = products.find((p) => p.id === l.productId)
-          if (!product) return null
-          return {
-            id: l.id,
-            product,
-            count: l.count,
-            ...(l.button ? { button: l.button } : {}),
-          }
-        })
-        .filter((l): l is CartLine => l !== null),
-    [cart, products],
-  )
-
-  const cartCount = lines.length
-  const cartTotal = lines.reduce(
-    (s, l) => s + lineTotal(lineBaseQty(l.count, l.button), l.product.sell_price, l.button, l.product.pricing_mode),
-    0,
-  )
-  const pendingCount = state.sales.filter((s) => s.syncStatus === 'pending').length
-
-  // Count per price button for the product the picker is showing — one
-  // consolidated cart line per button, so the picker reflects and edits the
-  // cart live.
-  const pickerCounts = useMemo<Record<number, number>>(() => {
-    const m: Record<number, number> = {}
-    if (!buttonProduct) return m
-    for (const l of cart) {
-      if (l.productId === buttonProduct.id && l.button) m[l.button.id] = l.count
-    }
-    return m
-  }, [cart, buttonProduct])
-
-  const pickerMaxCount = useCallback(
-    (button: ApiPriceButton): number | null => {
-      if (!buttonProduct) return null
-      return maxCountIn(cart, buttonProduct, button)
-    },
-    [cart, buttonProduct],
-  )
-
-  const addLine = (p: ApiProduct, button: ApiPriceButton | undefined, count: number) => {
-    setCart((c) => {
-      if (!button) {
-        // Flat-rate lines merge per product (capped at stock).
-        const existing = c.find((l) => l.productId === p.id && !l.button)
-        if (existing) {
-          return c.map((l) =>
-            l.id === existing.id ? { ...l, count: Math.min(l.count + count, p.total_stock) } : l,
-          )
-        }
-        return [...c, { id: nextLineId.current++, productId: p.id, count, button: undefined }]
-      }
-      // Identical selling button taps consolidate into ONE line and the count
-      // grows ("1 tomato @ KSh5" tapped twice = count 2, KSh10). Different
-      // buttons stay separate lines — they are different pricing rules.
-      const existing = c.find((l) => l.productId === p.id && l.button && l.button.id === button.id)
-      if (existing) {
-        const max = maxCountIn(c, p, button, button.id)
-        return c.map((l) =>
-          l.id === existing.id
-            ? { ...l, count: max != null ? Math.min(l.count + count, max) : l.count + count }
-            : l,
-        )
-      }
-      return [...c, { id: nextLineId.current++, productId: p.id, count, button }]
-    })
-  }
-
   const tapProduct = (p: ApiProduct) => {
     if (p.total_stock <= 0) return
     // Products with fixed-price buttons open the picker instead of adding at
@@ -268,113 +68,7 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
       setButtonProduct(p)
       return
     }
-    addLine(p, undefined, stepFor(p.base_unit))
-  }
-
-  const changeQty = (lineId: number, qty: number) => {
-    setCart((c) => {
-      const line = c.find((l) => l.id === lineId)
-      if (!line) return c
-      // Zero removes the line — the existing cart convention (and the count
-      // control's floor: count never exists below 1).
-      if (qty <= 0) return c.filter((l) => l.id !== lineId)
-      const product = products.find((p) => p.id === line.productId)
-      if (!product) return c
-      if (line.button) {
-        // Button lines: qty is the COUNT (times sold). Tracked buttons cap at
-        // what's on the shelf; legacy untracked buttons have no cap.
-        const max = maxCountIn(c, product, line.button, line.button.id)
-        const next = Math.round(qty)
-        const capped = max != null ? Math.min(next, max) : next
-        if (capped <= 0) return c.filter((l) => l.id !== lineId)
-        return c.map((l) => (l.id === lineId ? { ...l, count: capped } : l))
-      }
-      // Flat lines: never sell past what's on the shelf — account for other
-      // lines of the same product already in the cart.
-      const reserved = c
-        .filter((l) => l.productId === line.productId && l.id !== lineId)
-        .reduce((s, l) => s + lineBaseQty(l.count, l.button), 0)
-      const max = Math.max(0, product.total_stock - reserved)
-      const next = Math.min(qty, max)
-      if (next <= 0) return c // no room — keep the line unchanged
-      return c.map((l) => (l.id === lineId ? { ...l, count: next } : l))
-    })
-  }
-
-  const completeCharge = (attendantId: number) => {
-    const items = lines.map((l) => {
-      const qty = lineBaseQty(l.count, l.button)
-      const counted = l.product.pricing_mode === 'counted'
-      return {
-        productId: l.product.id,
-        qty,
-        unit: l.product.base_unit,
-        unitPrice: lineUnitPrice(l.product.sell_price, l.button, l.product.pricing_mode),
-        // Display only — the backend computes cost/profit from qty + unitPrice.
-        tierLabel: l.button?.label,
-        // A counted option with an exact amount consumes real stock — flag the
-        // line so the backend routes it through FIFO like a weighed sale.
-        amountInBaseUnit: counted && l.button?.kg_amount != null ? qty : undefined,
-        // Times the selling button was sold — survives the offline queue and
-        // is snapshotted server-side so history can show "3 × 1 tomato".
-        count: l.button ? l.count : undefined,
-      }
-    })
-    const total = cartTotal
-    const itemCount = lines.length
-    const id = newSaleId()
-    const createdAt = nowIso()
-    const online = !offline
-
-    dispatch({
-      type: 'CHECKOUT',
-      id,
-      sale: { items, total, attendantId, createdAt, payment },
-    })
-
-    setLastAttendant(attendantId)
-    saveLastAttendant(attendantId)
-    setCart([])
-    setCartOpen(false)
-
-    // OFFLINE: the sale is now persisted locally as pending — the success
-    // state is honest immediately ("saved offline, will sync").
-    if (!online) {
-      showToast({ kind: 'offline', total, itemCount })
-      return
-    }
-
-    // ONLINE: push to the server right away. The success toast appears ONLY
-    // when the server acknowledges — never merely because the PIN was entered.
-    // On a network failure the sale stays pending locally (same offline
-    // wording applies — it will sync later); on a server rejection nothing
-    // success-like is shown, the reason lands in My Sales.
-    const queued = {
-      id,
-      saleNumber: state.nextSaleNumber,
-      items,
-      total,
-      attendantId,
-      createdAt,
-      payment,
-      syncStatus: 'pending' as const,
-    }
-    pushSaleToServer(queued).then((outcome) => {
-      if (outcome.ok) {
-        dispatch({ type: 'REMOVE_SALE', id })
-        loadData() // refresh stock + prices after the sale lands
-        showToast({ kind: 'online', total, itemCount })
-      } else if (outcome.errors.length === 0) {
-        // Unreachable — no verdict; the sale waits in the queue for retry.
-        showToast({ kind: 'offline', total, itemCount })
-      } else {
-        // Rejected — reason shown in My Sales; no success toast.
-        const reason = outcome.errors[0]
-        if (reason !== undefined) {
-          dispatch({ type: 'MARK_PENDING', id, reason })
-        }
-      }
-    })
+    cart.addLine(p, undefined, stepFor(p.base_unit))
   }
 
   if (loading) {
@@ -528,10 +222,8 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
                   <ProductTile
                     key={p.id}
                     product={p}
-                    selected={cart.some((l) => l.productId === p.id)}
-                    inCartQty={cart
-                      .filter((l) => l.productId === p.id)
-                      .reduce((s, l) => s + lineBaseQty(l.count, l.button), 0)}
+                    selected={cart.hasProduct(p.id)}
+                    inCartQty={cart.baseQtyOf(p.id)}
                     disabled={p.total_stock <= 0}
                     hasButtons={(p.price_buttons?.length ?? 0) > 0}
                     onTap={() => tapProduct(p)}
@@ -545,12 +237,12 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
         {/* Desktop cart */}
         <aside className="hidden w-[360px] shrink-0 border-l border-ink-200 bg-white lg:block">
           <CartPanel
-            lines={lines}
+            lines={cart.lines}
             payment={payment}
             onPaymentChange={setPayment}
-            onQtyChange={changeQty}
-            onRemove={(id) => changeQty(id, 0)}
-            onClear={() => setCart([])}
+            onQtyChange={cart.changeQty}
+            onRemove={(id) => cart.changeQty(id, 0)}
+            onClear={cart.clearCart}
             onCharge={() => setPinOpen(true)}
             offline={offline}
           />
@@ -567,9 +259,9 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
           >
             <span className="flex items-center gap-2 text-[15px] font-bold">
               <ShoppingBag className="size-4.5" aria-hidden />
-              {cartCount === 0 ? 'Cart is empty' : `View cart · ${cartCount}`}
+              {cart.cartCount === 0 ? 'Cart is empty' : `View cart · ${cart.cartCount}`}
             </span>
-            <span className="text-[15px] font-extrabold tabular">{fmtKES(cartTotal)}</span>
+            <span className="text-[15px] font-extrabold tabular">{fmtKES(cart.cartTotal)}</span>
           </button>
         </div>
       )}
@@ -585,12 +277,12 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
             <div className="flex h-[82dvh] flex-col">
               <div className="min-h-0 flex-1">
                 <CartPanel
-                  lines={lines}
+                  lines={cart.lines}
                   payment={payment}
                   onPaymentChange={setPayment}
-                  onQtyChange={changeQty}
-                  onRemove={(id) => changeQty(id, 0)}
-                  onClear={() => setCart([])}
+                  onQtyChange={cart.changeQty}
+                  onRemove={(id) => cart.changeQty(id, 0)}
+                  onClear={cart.clearCart}
                   onCharge={() => {
                     setCartOpen(false)
                     setPinOpen(true)
@@ -612,8 +304,8 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
 
       <PinModal
         open={pinOpen}
-        total={cartTotal}
-        itemCount={cartCount}
+        total={cart.cartTotal}
+        itemCount={cart.cartCount}
         attendants={attendants}
         defaultAttendantId={lastAttendant}
         offline={offline}
@@ -655,44 +347,26 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
         // Button → count map for the lines already in the cart (the picker
         // is a live editor: tapping a button adds it at count 1, the count
         // control adjusts it in place, and identical buttons consolidate).
-        counts={pickerCounts}
-        maxCountFor={pickerMaxCount}
+        counts={buttonProduct ? cart.buttonCounts(buttonProduct.id) : {}}
+        maxCountFor={(button) => (buttonProduct ? cart.maxCountFor(buttonProduct, button) : null)}
         onAdd={(button, count) => {
-          if (buttonProduct) addLine(buttonProduct, button, count)
+          if (buttonProduct) cart.addLine(buttonProduct, button, count)
         }}
         onChangeCount={(button, count) => {
           if (!buttonProduct) return
-          const line = cart.find((l) => l.productId === buttonProduct.id && l.button?.id === button.id)
+          const line = cart.findButtonLine(buttonProduct.id, button.id)
           if (!line) {
-            if (count > 0) addLine(buttonProduct, button, count)
+            if (count > 0) cart.addLine(buttonProduct, button, count)
             return
           }
           // 0 removes the line (existing cart convention); otherwise the
           // count is capped at stock in changeQty.
-          changeQty(line.id, count)
+          cart.changeQty(line.id, count)
         }}
         onClose={() => setButtonProduct(null)}
       />
 
       {mySalesOpen && <MySalesPanel onClose={() => setMySalesOpen(false)} />}
     </div>
-  )
-}
-
-function OfflinePill({ offline, pending }: { offline: boolean; pending: number }) {
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset',
-        offline
-          ? 'bg-warning-50 text-warning-700 ring-warning-600/25'
-          : 'bg-success-50 text-success-700 ring-success-600/20',
-      )}
-      aria-live="polite"
-    >
-      <span className={cn('size-1.5 rounded-full', offline ? 'bg-warning-400' : 'bg-success-600')} aria-hidden />
-      {offline ? 'Offline' : 'Online'}
-      {!offline && pending > 0 && <span className="font-bold tabular">{pending} queued</span>}
-    </span>
   )
 }
