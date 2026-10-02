@@ -8,6 +8,7 @@ import type { Category, Unit } from '../lib/types'
 import { Card } from '../components/ui/Card'
 import { StatusPill, type PillTone } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { Menu } from '../components/ui/Menu'
@@ -73,6 +74,7 @@ export function ProductsPage() {
 
   const [products, setProducts] = useState<ApiProduct[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [query, setQuery] = useState(q)
   const [catFilter, setCatFilter] = useState<Category | 'all'>('all')
@@ -81,14 +83,27 @@ export function ProductsPage() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const loadProducts = useCallback(async () => {
-    const res = await productsApi.list()
-    if (res.ok) setProducts(res.data)
-    setLoading(false)
+    try {
+      const res = await productsApi.list()
+      if (res.ok) setProducts(res.data)
+      setLoadError(res.ok ? null : (res.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
     loadProducts()
   }, [loadProducts])
+
+  // Focus the name field once the dialog is open. A native <dialog> would
+  // otherwise focus its first control (the close button).
+  const isFormOpen = form !== null
+  useEffect(() => {
+    if (isFormOpen) document.getElementById('product-name-field')?.focus()
+  }, [isFormOpen])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -248,6 +263,8 @@ export function ProductsPage() {
           </Button>
         }
       />
+
+      {loadError && <LoadError message={loadError} onRetry={loadProducts} />}
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <form onSubmit={submitSearch} role="search" className="relative min-w-0 flex-1 sm:max-w-xs">
@@ -436,7 +453,7 @@ export function ProductsPage() {
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="e.g. Red Onions"
-              autoFocus
+              id="product-name-field"
             />
 
             <Segmented<PricingMode>

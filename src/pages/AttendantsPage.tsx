@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyRound, Users } from 'lucide-react'
 import { attendantsApi, salesApi, type ApiAttendant, type ApiSale } from '../lib/api'
 import { fmtKES } from '../lib/format'
 import { Card } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { initialsOf } from '../lib/utils'
@@ -32,6 +33,13 @@ export function AttendantsPage() {
   const [attendants, setAttendants] = useState<ApiAttendant[]>([])
   const [sales, setSales] = useState<ApiSale[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [todayStartMs] = useState(() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d.getTime()
+  })
+  const closeTimer = useRef<number | undefined>(undefined)
   const [period, setPeriod] = useState<Period>('today')
   const [resetTarget, setResetTarget] = useState<ApiAttendant | null>(null)
   const [newPin, setNewPin] = useState('')
@@ -40,15 +48,23 @@ export function AttendantsPage() {
   const [pinDone, setPinDone] = useState(false)
 
   const loadData = useCallback(async () => {
-    const [aRes, sRes] = await Promise.all([attendantsApi.list(), salesApi.list()])
-    if (aRes.ok) setAttendants(aRes.data)
-    if (sRes.ok) setSales(sRes.data)
-    setLoading(false)
+    try {
+      const [aRes, sRes] = await Promise.all([attendantsApi.list(), salesApi.list()])
+      if (aRes.ok) setAttendants(aRes.data)
+      if (sRes.ok) setSales(sRes.data)
+      setLoadError(aRes.ok && sRes.ok ? null : (aRes.error ?? sRes.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  useEffect(() => () => window.clearTimeout(closeTimer.current), [])
 
   const { start, end } = useMemo(() => periodRange(period), [period])
 
@@ -93,7 +109,8 @@ export function AttendantsPage() {
       return
     }
     setPinDone(true)
-    window.setTimeout(() => setResetTarget(null), 1200)
+    window.clearTimeout(closeTimer.current)
+    closeTimer.current = window.setTimeout(() => setResetTarget(null), 1200)
   }
 
   if (loading) {
@@ -117,13 +134,13 @@ export function AttendantsPage() {
         subtitle="The people behind the counter — their PINs and how they're selling."
       />
 
+      {loadError && <LoadError message={loadError} onRetry={loadData} />}
+
       {/* Attendant cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {attendants.map((a) => {
-          const todayStart = new Date()
-          todayStart.setHours(0, 0, 0, 0)
           const todaySales = sales.filter(
-            (s) => s.attendant_id === a.id && new Date(s.created_at).getTime() >= todayStart.getTime(),
+            (s) => s.attendant_id === a.id && new Date(s.created_at).getTime() >= todayStartMs,
           )
           const todayTotal = todaySales.reduce((s, x) => s + x.revenue, 0)
           return (

@@ -10,6 +10,7 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { Button } from '../components/ui/Button'
 import { TextField, SelectField } from '../components/ui/Form'
 import { EmptyState } from '../components/ui/EmptyState'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { cn } from '../lib/utils'
 
 interface WastageForm {
@@ -37,15 +38,23 @@ export function WastagePage() {
   const [entries, setEntries] = useState<ApiWastage[]>([])
   const [products, setProducts] = useState<ApiProduct[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [nowMs] = useState(() => Date.now())
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState<WastageForm | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
-    const [wRes, pRes] = await Promise.all([wastageApi.list(), productsApi.list()])
-    if (wRes.ok) setEntries(wRes.data)
-    if (pRes.ok) setProducts(pRes.data)
-    setLoading(false)
+    try {
+      const [wRes, pRes] = await Promise.all([wastageApi.list(), productsApi.list()])
+      if (wRes.ok) setEntries(wRes.data)
+      if (pRes.ok) setProducts(pRes.data)
+      setLoadError(wRes.ok && pRes.ok ? null : (wRes.error ?? pRes.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -57,7 +66,7 @@ export function WastagePage() {
   const sorted = useMemo(() => [...entries].sort((a, b) => b.date.localeCompare(a.date)), [entries])
 
   const summary = useMemo(() => {
-    const cutoff = new Date()
+    const cutoff = new Date(nowMs)
     cutoff.setDate(cutoff.getDate() - 30)
     const recent = sorted.filter((e) => new Date(e.date).getTime() >= cutoff.getTime())
     const value = recent.reduce((s, e) => s + e.quantity * (productById.get(e.product_id) ? costOf(productById.get(e.product_id)!) : 0), 0)
@@ -132,6 +141,8 @@ export function WastagePage() {
           </Button>
         }
       />
+
+      {loadError && <LoadError message={loadError} onRetry={loadData} />}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         {/* Form */}

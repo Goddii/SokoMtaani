@@ -6,6 +6,7 @@ import { batchesApi, productsApi, type ApiBatch, type ApiProduct } from '../lib/
 import { Card } from '../components/ui/Card'
 import { StatusPill } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { Menu } from '../components/ui/Menu'
@@ -41,16 +42,23 @@ export function BatchesPage() {
   const [batches, setBatches] = useState<ApiBatch[]>([])
   const [products, setProducts] = useState<ApiProduct[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
   const [filter, setFilter] = useState<Filter>('all')
   const [form, setForm] = useState<BatchForm | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
 
   const loadBatches = useCallback(async () => {
-    const [bRes, pRes] = await Promise.all([batchesApi.list(), productsApi.list()])
-    if (bRes.ok) setBatches(bRes.data)
-    if (pRes.ok) setProducts(pRes.data)
-    setLoading(false)
+    try {
+      const [bRes, pRes] = await Promise.all([batchesApi.list(), productsApi.list()])
+      if (bRes.ok) setBatches(bRes.data)
+      if (pRes.ok) setProducts(pRes.data)
+      setLoadError(bRes.ok && pRes.ok ? null : (bRes.error ?? pRes.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -143,6 +151,8 @@ export function BatchesPage() {
           </Button>
         }
       />
+
+      {loadError && <LoadError message={loadError} onRetry={loadBatches} />}
 
       {/* Summary strip */}
       <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">

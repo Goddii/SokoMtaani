@@ -60,6 +60,8 @@ interface CartLineState {
   button?: ApiPriceButton
 }
 
+const nowIso = () => new Date().toISOString()
+
 /**
  * Max times a button can be sold against a cart snapshot: stock on hand minus
  * what every OTHER line of the product already holds (each sold at its own
@@ -105,6 +107,10 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
   // sale; OFFLINE shows as soon as the sale is persisted locally as pending.
   const [toast, setToast] = useState<{ kind: 'online' | 'offline'; total: number; itemCount: number } | null>(null)
   const toastTimer = useRef<number | null>(null)
+  const syncInFlight = useRef(false)
+  const syncAgain = useRef(false)
+  const [syncTick, setSyncTick] = useState(0)
+  const [nowMs] = useState(() => Date.now())
 
   const showToast = useCallback((t: NonNullable<typeof toast>) => {
     setToast(t)
@@ -133,6 +139,14 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
     if (offline) return
     const pendingSales = state.sales.filter((s) => s.syncStatus === 'pending')
     if (!pendingSales.length) return
+    // One push at a time: every dispatch below changes state.sales and
+    // re-fires this effect. If a push is already running, note that and
+    // re-run once it finishes so a sale queued meanwhile is not stranded.
+    if (syncInFlight.current) {
+      syncAgain.current = true
+      return
+    }
+    syncInFlight.current = true
     Promise.all(pendingSales.map((sale) => pushSaleToServer(sale))).then((outcomes) => {
       if (outcomes.every((o) => o.ok)) {
         dispatch({ type: 'SYNC_ALL', now: new Date().toISOString() })
@@ -154,7 +168,17 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
         }
       })
     })
-  }, [offline, state.sales, dispatch, loadData])
+      // A thrown network error leaves the sales pending; the next state change
+      // or reconnect retries them.
+      .catch(() => {})
+      .finally(() => {
+        syncInFlight.current = false
+        if (syncAgain.current) {
+          syncAgain.current = false
+          setSyncTick((t) => t + 1)
+        }
+      })
+  }, [offline, state.sales, dispatch, loadData, syncTick])
 
   const visibleProducts = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -299,7 +323,7 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
     const total = cartTotal
     const itemCount = lines.length
     const id = newSaleId()
-    const createdAt = new Date().toISOString()
+    const createdAt = nowIso()
     const online = !offline
 
     dispatch({
@@ -384,7 +408,7 @@ export function PosPage({ onLogout }: { onLogout?: () => void }) {
           <div className="min-w-0">
             <p className="truncate text-[15px] font-bold leading-tight tracking-tight text-ink-900">Point of Sale</p>
             <p className="truncate text-[11px] font-medium text-ink-500">
-              {new Intl.DateTimeFormat('en-KE', { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date())}
+              {new Intl.DateTimeFormat('en-KE', { weekday: 'short', day: 'numeric', month: 'short' }).format(nowMs)}
             </p>
           </div>
           <div className="flex-1" />

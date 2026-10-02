@@ -24,6 +24,7 @@ import { dashboardApi, salesApi, type ApiDashboardSummary, type ApiSale, type Ap
 import { fmtKES, fmtNum, fmtDateShort, fmtTime } from '../lib/format'
 import { Card, StatusPill } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
 import { cn } from '../lib/utils'
 
@@ -60,24 +61,49 @@ export function DashboardPage() {
   const [recentSales, setRecentSales] = useState<ApiSale[]>([])
   const [range, setRange] = useState(14)
   const [marginAsc, setMarginAsc] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [seriesError, setSeriesError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [nowMs] = useState(() => Date.now())
 
   // Server-side aggregation only — the dashboard never downloads bulk sale
   // history. The chart comes from /dashboard/series (N aggregate points) and
   // the recent-sales card from a tiny paginated page fetch.
+  // `ignore` drops responses from a superseded effect run (unmount, retry or a
+  // newer range) so a slow earlier request can't overwrite fresher data.
   useEffect(() => {
-    dashboardApi.summary().then((res) => {
-      if (res.ok) setSummary(res.data)
-    })
-    salesApi.page({ per_page: 8 }).then((res) => {
-      if (res.ok) setRecentSales(res.data.items)
-    })
-  }, [])
+    let ignore = false
+    Promise.all([dashboardApi.summary(), salesApi.page({ per_page: 8 })])
+      .then(([sRes, pRes]) => {
+        if (ignore) return
+        if (sRes.ok) setSummary(sRes.data)
+        if (pRes.ok) setRecentSales(pRes.data.items)
+        setLoadError(sRes.ok && pRes.ok ? null : (sRes.error ?? pRes.error ?? LOAD_ERROR_FALLBACK))
+      })
+      .catch(() => {
+        if (!ignore) setLoadError(LOAD_ERROR_FALLBACK)
+      })
+    return () => {
+      ignore = true
+    }
+  }, [reloadKey])
 
   useEffect(() => {
-    dashboardApi.series(range).then((res) => {
-      if (res.ok) setSeries(res.data.series)
-    })
-  }, [range])
+    let ignore = false
+    dashboardApi
+      .series(range)
+      .then((res) => {
+        if (ignore) return
+        if (res.ok) setSeries(res.data.series)
+        setSeriesError(res.ok ? null : (res.error ?? LOAD_ERROR_FALLBACK))
+      })
+      .catch(() => {
+        if (!ignore) setSeriesError(LOAD_ERROR_FALLBACK)
+      })
+    return () => {
+      ignore = true
+    }
+  }, [range, reloadKey])
 
   const pending = state.sales.filter((s) => s.syncStatus === 'pending').length
 
@@ -124,7 +150,7 @@ export function DashboardPage() {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
-  }).format(new Date())
+  }).format(nowMs)
 
   return (
     <div>
@@ -137,6 +163,10 @@ export function DashboardPage() {
           </Button>
         }
       />
+
+      {(loadError ?? seriesError) && (
+        <LoadError message={(loadError ?? seriesError)!} onRetry={() => setReloadKey((k) => k + 1)} />
+      )}
 
       {/* KPI row */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -352,8 +382,9 @@ export function DashboardPage() {
                       </td>
                       <td className="px-3 py-3 text-right text-sm font-semibold tabular text-ink-600">{fmtKES(m.cost)}</td>
                       <td className="px-3 py-3">
+                        <span className="sr-only">Margin</span>
                         <div className="flex items-center gap-2">
-                          <div className="h-1.5 w-20 overflow-hidden rounded-full bg-ink-100">
+                          <div className="h-1.5 w-20 overflow-hidden rounded-full bg-ink-100" aria-hidden>
                             <div
                               className={cn(
                                 'h-full rounded-full',

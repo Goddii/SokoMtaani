@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronLeft, ChevronRight, Download, Receipt, RotateCcw } from 'lucide-react'
 import { attendantsApi, productsApi, salesApi, type ApiDailySummary, type ApiSale } from '../lib/api'
 import { fmtKES, fmtDateShort, fmtNum, fmtTime, todayKey } from '../lib/format'
 import { Card, StatusPill } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
 import { Modal } from '../components/ui/Modal'
 import { SelectField, TextField } from '../components/ui/Form'
@@ -52,6 +53,8 @@ export function SalesPage() {
   const [attendants, setAttendants] = useState<Array<{ value: string; label: string }>>([])
   const [products, setProducts] = useState<Array<{ value: string; label: string }>>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const loadSeq = useRef(0)
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [voidGroup, setVoidGroup] = useState<Group | null>(null)
@@ -60,15 +63,23 @@ export function SalesPage() {
   const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
+    let ignore = false
     attendantsApi.list().then((res) => {
-      if (res.ok) setAttendants(res.data.map((a) => ({ value: String(a.id), label: a.name })))
+      if (!ignore && res.ok) setAttendants(res.data.map((a) => ({ value: String(a.id), label: a.name })))
     })
     productsApi.list().then((res) => {
-      if (res.ok) setProducts(res.data.map((p) => ({ value: String(p.id), label: p.name })))
+      if (!ignore && res.ok) setProducts(res.data.map((p) => ({ value: String(p.id), label: p.name })))
     })
+    return () => {
+      ignore = true
+    }
   }, [])
 
   const load = useCallback(async () => {
+    // Only the latest call may apply its results — a slower earlier filter or
+    // page request must not overwrite the current view.
+    const seq = ++loadSeq.current
+    const isLatest = () => seq === loadSeq.current
     setLoading(true)
     const params = {
       from: filters.from || undefined,
@@ -78,21 +89,28 @@ export function SalesPage() {
       page,
       per_page: PER_PAGE,
     }
-    const [pRes, sRes] = await Promise.all([
-      salesApi.page(params),
-      salesApi.dailySummary({
-        from: params.from,
-        to: params.to,
-        attendant_id: params.attendant_id,
-        product_id: params.product_id,
-      }),
-    ])
-    if (pRes.ok) {
-      setRows(pRes.data.items)
-      setTotal(pRes.data.total)
+    try {
+      const [pRes, sRes] = await Promise.all([
+        salesApi.page(params),
+        salesApi.dailySummary({
+          from: params.from,
+          to: params.to,
+          attendant_id: params.attendant_id,
+          product_id: params.product_id,
+        }),
+      ])
+      if (!isLatest()) return
+      if (pRes.ok) {
+        setRows(pRes.data.items)
+        setTotal(pRes.data.total)
+      }
+      if (sRes.ok) setSummary(sRes.data)
+      setLoadError(pRes.ok && sRes.ok ? null : (pRes.error ?? sRes.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      if (isLatest()) setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      if (isLatest()) setLoading(false)
     }
-    if (sRes.ok) setSummary(sRes.data)
-    setLoading(false)
   }, [filters, page])
 
   useEffect(() => {
@@ -199,6 +217,8 @@ export function SalesPage() {
         }
       />
 
+      {loadError && <LoadError message={loadError} onRetry={load} />}
+
       {/* Filters */}
       <Card className="mb-5 p-4">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -268,7 +288,9 @@ export function SalesPage() {
             <table className="w-full min-w-[720px] text-left">
               <thead>
                 <tr className="border-b border-ink-200 bg-ink-50/60 text-xs font-bold uppercase tracking-wider text-ink-400">
-                  <th className="w-10 px-3 py-3" />
+                  <th className="w-10 px-3 py-3">
+                    <span className="sr-only">Expand</span>
+                  </th>
                   <th className="px-3 py-3">When</th>
                   <th className="px-3 py-3">Attendant</th>
                   <th className="px-3 py-3 text-right">Items</th>

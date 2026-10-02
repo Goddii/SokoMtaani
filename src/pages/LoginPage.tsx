@@ -72,7 +72,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
         <div className="bg-[#162016] border border-green-900/40 rounded-2xl p-6 shadow-2xl">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-green-300/70 mb-1.5">
+              <label htmlFor="attendant-id" className="block text-xs font-medium text-green-300/70 mb-1.5">
                 Attendant ID
               </label>
               <input
@@ -87,7 +87,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-green-300/70 mb-1.5">
+              <label htmlFor="pin-input" className="block text-xs font-medium text-green-300/70 mb-1.5">
                 4-Digit PIN
               </label>
               <input
