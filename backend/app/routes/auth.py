@@ -6,10 +6,32 @@ from marshmallow import ValidationError
 from app.extensions import db, check_pin
 from app.models.attendant import Attendant
 from app.schemas.attendant_schema import LoginSchema, AttendantSchema
+from app.utils.pin_lockout import record_failure, record_success, seconds_locked
 
 auth_bp = Blueprint("auth", __name__)
 login_schema = LoginSchema()
 attendant_schema = AttendantSchema()
+
+
+def _check_pin_with_lockout(attendant: Attendant, pin: str):
+    """Verify a PIN under the shared lockout. Returns an error response, or None on success.
+
+    A locked attendant is refused even with the correct PIN, so a brute-forcer
+    learns nothing during the cool-down.
+    """
+    wait = seconds_locked(attendant)
+    if wait:
+        resp = jsonify({"error": "Too many wrong PINs. Try again later.", "retry_after": wait})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(wait)
+        return resp
+
+    if not check_pin(pin, attendant.pin_hash):
+        record_failure(attendant)
+        return jsonify({"error": "Incorrect PIN."}), 401
+
+    record_success(attendant)
+    return None
 
 
 @auth_bp.post("/login")
@@ -28,8 +50,9 @@ def login():
     if not attendant or not attendant.active:
         return jsonify({"error": "Invalid attendant or account inactive."}), 401
 
-    if not check_pin(data["pin"], attendant.pin_hash):
-        return jsonify({"error": "Incorrect PIN."}), 401
+    pin_error = _check_pin_with_lockout(attendant, data["pin"])
+    if pin_error:
+        return pin_error
 
     # Identity is a string (attendant ID); role stored in additional_claims
     token = create_access_token(
@@ -73,8 +96,9 @@ def verify_pin():
     if not attendant or not attendant.active:
         return jsonify({"error": "Invalid attendant or account inactive."}), 401
 
-    if not check_pin(pin, attendant.pin_hash):
-        return jsonify({"error": "Incorrect PIN."}), 401
+    pin_error = _check_pin_with_lockout(attendant, pin)
+    if pin_error:
+        return pin_error
 
     return jsonify({"ok": True, "attendant_id": attendant.id}), 200
 

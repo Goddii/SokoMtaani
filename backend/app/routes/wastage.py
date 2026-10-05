@@ -8,7 +8,7 @@ from marshmallow import ValidationError
 from app.extensions import db
 from app.models.product import Product
 from app.models.wastage import Wastage
-from app.routes.sales import _fifo_deduct  # reuse FIFO logic
+from app.services.sale_sync import fifo_deduct
 from app.schemas.wastage_schema import WastageSchema, WastageCreateSchema
 
 wastage_bp = Blueprint("wastage", __name__)
@@ -32,7 +32,7 @@ def log_wastage():
     qty = data["quantity"]
 
     try:
-        _, batch, _ = _fifo_deduct(product, qty)
+        _, batch, _ = fifo_deduct(product, qty)
     except ValueError as e:
         return jsonify({"error": str(e)}), 422
 

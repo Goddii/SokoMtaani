@@ -132,6 +132,7 @@ export function OfflineIndicator({ className }: { className?: string }) {
               <button
                 type="button"
                 role="switch"
+                aria-label="Simulate offline"
                 aria-checked={offline}
                 onClick={() => setDemoOfflineState(!offline)}
                 className={cn(

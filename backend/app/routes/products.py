@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt
+from flask_jwt_extended import jwt_required
 from marshmallow import ValidationError
 
 from app.extensions import db
@@ -7,17 +7,11 @@ from app.models.product import Product, PricingMode
 from app.models.price_button import PriceButton
 from app.models.stock_batch import StockBatch, BatchStatus
 from app.schemas.product_schema import ProductSchema
+from app.utils.auth import owner_required
 
 products_bp = Blueprint("products", __name__)
 product_schema = ProductSchema()
 products_schema = ProductSchema(many=True)
-
-
-def _require_owner():
-    claims = get_jwt()
-    if claims.get("role") != "owner":
-        return jsonify({"error": "Owner access required."}), 403
-    return None
 
 
 def _build_buttons(raw_buttons, pricing_mode):
@@ -61,13 +55,9 @@ def list_products():
 
 
 @products_bp.post("")
-@jwt_required()
+@owner_required
 def create_product():
     """POST /api/products — create a new product (owner only)."""
-    err = _require_owner()
-    if err:
-        return err
-
     try:
         data = product_schema.load(request.get_json(silent=True) or {})
     except ValidationError as e:
@@ -106,13 +96,9 @@ def create_product():
 
 
 @products_bp.put("/<int:product_id>")
-@jwt_required()
+@owner_required
 def update_product(product_id: int):
     """PUT /api/products/<id> — edit a product (owner only)."""
-    err = _require_owner()
-    if err:
-        return err
-
     product = db.get_or_404(Product, product_id)
 
     try:

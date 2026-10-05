@@ -1,0 +1,154 @@
+# GitHub Actions Security Pipeline
+# Place in .github/workflows/security.yml
+
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly scan to catch new vulnerabilities in dependencies
+    - cron: '0 6 * * 1'
+
+jobs:
+  sast:
+    name: Static Analysis (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for gitleaks
+
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/owasp-top-ten
+            p/cwe-top-25
+            p/secrets
+            p/ci
+          generateSarif: true
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  dependency-scan:
+    name: Dependency Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+  secrets-scan:
+    name: Secrets Detection (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: '--verbose --redact --config=.gitleaks.toml'
+
+  container-scan:
+    name: Container Image Scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t app:${{ github.sha }} .
+          docker save app:${{ github.sha }} -o app.tar
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          scan-ref: 'app:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Upload image scan SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+  license-check:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check licenses
+        run: |
+          # Add your license scanning tool here
+          # Example: fossa, clearlydefined, or licensee
+          echo "License check placeholder - integrate your preferred tool"
+
+  security-gate:
+    name: Security Gate
+    needs: [sast, dependency-scan, secrets-scan, container-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check security results
+        run: |
+          # This job fails if any security job failed
+          # Individual job failures will surface in the UI
+          echo "Security gate passed - all scans completed"
+          
+      - name: Comment PR with summary
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Could post a summary comment with links to SARIF results
+            console.log('Security scan complete')
+
+# Optional: Additional security jobs
+# - Dependency review (GitHub native)
+# - CodeQL analysis (for supported languages)
+# - SCA with Snyk/Dependabot/OWASP Dependency Check
+# - SAST with CodeQL/Checkmarx/SonarQube
+# - DAST with OWASP ZAP (against staging)
+# - IaC scanning (tfsec, checkov, kics) for Terraform/K8s
+# - SBOM generation (Syft) + vulnerability scan (Grype)

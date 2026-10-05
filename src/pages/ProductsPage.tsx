@@ -1,70 +1,26 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { MoreHorizontal, Package, PackagePlus, Pencil, Plus, Search, X } from 'lucide-react'
+import { MoreHorizontal, Package, PackagePlus, Pencil, Search, X } from 'lucide-react'
 import { costOf, marginOf } from '../lib/calc'
 import { fmtKES, fmtNum } from '../lib/format'
-import { productsApi, type ApiProduct, type PricingMode } from '../lib/api'
-import type { Category, Unit } from '../lib/types'
+import { productsApi, type ApiProduct } from '../lib/api'
+import type { Category } from '../lib/types'
 import { Card } from '../components/ui/Card'
 import { StatusPill, type PillTone } from '../components/ui/Card'
 import { PageHeader } from '../components/ui/PageHeader'
+import { LoadError, LOAD_ERROR_FALLBACK } from '../components/ui/LoadError'
 import { Button } from '../components/ui/Button'
-import { Modal } from '../components/ui/Modal'
 import { Menu } from '../components/ui/Menu'
-import { TextField, SelectField, Segmented } from '../components/ui/Form'
 import { CATEGORY_META } from '../components/pos/posMeta'
 import { EmptyState } from '../components/ui/EmptyState'
 import { cn } from '../lib/utils'
-
-const CATEGORY_OPTIONS = [
-  { value: 'produce', label: 'Fresh produce' },
-  { value: 'dry', label: 'Dry goods' },
-  { value: 'packaging', label: 'Packaging & household' },
-]
-
-const UNIT_OPTIONS: Array<{ value: Unit; label: string }> = [
-  { value: 'kg', label: 'kg' },
-  { value: 'piece', label: 'piece' },
-  { value: 'litre', label: 'litre' },
-]
-
-const MODE_OPTIONS: Array<{ value: PricingMode; label: string }> = [
-  { value: 'weighed', label: 'By weight / measure' },
-  { value: 'counted', label: 'By count (pieces)' },
-]
+import { ProductFormModal } from './products/ProductFormModal'
+import { CATEGORY_OPTIONS, EMPTY_FORM, buildProductBody, formFromProduct, type ProductForm } from './products/productForm'
 
 function marginTone(margin: number): PillTone {
   if (margin < 0.12) return 'danger'
   if (margin < 0.25) return 'warning'
   return 'success'
-}
-
-/** One fixed-price button row in the form. kgAmount is weighed-mode only. */
-interface ButtonRow {
-  label: string
-  kgAmount: string
-  price: string
-}
-
-interface ProductForm {
-  id?: number
-  name: string
-  category: Category
-  baseUnit: Unit
-  pricingMode: PricingMode
-  sellPrice: string
-  lowStockThreshold: string
-  buttons: ButtonRow[]
-}
-
-const EMPTY_FORM: ProductForm = {
-  name: '',
-  category: 'produce',
-  baseUnit: 'kg',
-  pricingMode: 'weighed',
-  sellPrice: '',
-  lowStockThreshold: '',
-  buttons: [],
 }
 
 export function ProductsPage() {
@@ -73,6 +29,7 @@ export function ProductsPage() {
 
   const [products, setProducts] = useState<ApiProduct[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [query, setQuery] = useState(q)
   const [catFilter, setCatFilter] = useState<Category | 'all'>('all')
@@ -81,9 +38,15 @@ export function ProductsPage() {
   const [formError, setFormError] = useState<string | null>(null)
 
   const loadProducts = useCallback(async () => {
-    const res = await productsApi.list()
-    if (res.ok) setProducts(res.data)
-    setLoading(false)
+    try {
+      const res = await productsApi.list()
+      if (res.ok) setProducts(res.data)
+      setLoadError(res.ok ? null : (res.error ?? LOAD_ERROR_FALLBACK))
+    } catch {
+      setLoadError(LOAD_ERROR_FALLBACK)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -113,90 +76,19 @@ export function ProductsPage() {
 
   const openEdit = (p: ApiProduct) => {
     setFormError(null)
-    setForm({
-      id: p.id,
-      name: p.name,
-      category: p.category,
-      baseUnit: p.base_unit,
-      pricingMode: p.pricing_mode ?? 'weighed',
-      sellPrice: String(p.sell_price),
-      lowStockThreshold: String(p.reorder_threshold),
-      buttons: (p.price_buttons ?? []).map((b) => ({
-        label: b.label,
-        kgAmount: b.kg_amount != null ? String(b.kg_amount) : '',
-        price: String(b.price),
-      })),
-    })
+    setForm(formFromProduct(p))
   }
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (!form) return
-    const name = form.name.trim()
-    const threshold = parseFloat(form.lowStockThreshold)
-    if (!name) return setFormError('Give the product a name.')
-    if (!Number.isFinite(threshold) || threshold < 0) return setFormError('Low-stock threshold cannot be negative.')
-
-    // Weighed products need a flat per-unit selling price; counted products
-    // are priced entirely by their buttons.
-    const sellPrice = parseFloat(form.sellPrice)
-    if (form.pricingMode === 'weighed' && (!Number.isFinite(sellPrice) || sellPrice <= 0)) {
-      return setFormError('Selling price must be more than 0.')
-    }
-
-    // Price buttons: ignore fully-empty rows, but every filled row needs the
-    // fields relevant to the pricing mode.
-    const filledButtons = form.buttons.filter(
-      (b) => b.label.trim() !== '' || b.kgAmount.trim() !== '' || b.price.trim() !== '',
-    )
-    if (form.pricingMode === 'counted' && filledButtons.length === 0) {
-      return setFormError('Add at least one price button — sold-by-piece products are priced at the till from these.')
-    }
-
-    const priceButtons: Array<{ label: string; kg_amount: number | null; price: number; sort_order: number }> = []
-    for (const [i, b] of filledButtons.entries()) {
-      const price = parseFloat(b.price)
-      if (!b.label.trim()) return setFormError('Each price button needs a label, e.g. “1 @ KSh5” or “1/4 kg”.')
-      if (!Number.isFinite(price) || price < 0) return setFormError(`“${b.label.trim()}” needs a price of 0 or more.`)
-      if (form.pricingMode === 'counted') {
-        const amt = b.kgAmount.trim()
-        if (amt === '') {
-          // Untracked options are only allowed when editing a legacy product
-          // that already sells without stock deduction. New counted products
-          // must define how much stock each option consumes.
-          if (!form.id) {
-            return setFormError(`“${b.label.trim()}” needs an amount — how many pieces it takes from stock.`)
-          }
-          priceButtons.push({ label: b.label.trim(), kg_amount: null, price, sort_order: i })
-        } else {
-          const a = parseFloat(amt)
-          if (!Number.isFinite(a) || a <= 0) {
-            return setFormError(`“${b.label.trim()}” needs an amount greater than 0 pieces.`)
-          }
-          priceButtons.push({ label: b.label.trim(), kg_amount: a, price, sort_order: i })
-        }
-      } else {
-        const kg = parseFloat(b.kgAmount)
-        if (!Number.isFinite(kg) || kg <= 0) {
-          return setFormError(`“${b.label.trim()}” needs an amount greater than 0 ${form.baseUnit}.`)
-        }
-        priceButtons.push({ label: b.label.trim(), kg_amount: kg, price, sort_order: i })
-      }
-    }
+    const built = buildProductBody(form)
+    if (!built.ok) return setFormError(built.error)
 
     setSaving(true)
     setFormError(null)
 
-    const body = {
-      name,
-      category: form.category,
-      base_unit: form.baseUnit,
-      pricing_mode: form.pricingMode,
-      sell_price: form.pricingMode === 'counted' ? 0 : sellPrice,
-      reorder_threshold: threshold,
-      price_buttons: priceButtons,
-    }
-
+    const body = built.body
     const res = form.id ? await productsApi.update(form.id, body) : await productsApi.create(body)
 
     setSaving(false)
@@ -221,7 +113,6 @@ export function ProductsPage() {
   // and the backend 422 still catches it anyway.)
   const editingProduct = form?.id ? products.find((p) => p.id === form.id) : undefined
   const modeLocked = !!editingProduct && editingProduct.total_stock > 0
-  const unitLocked = modeLocked
 
   if (loading) {
     return (
@@ -248,6 +139,8 @@ export function ProductsPage() {
           </Button>
         }
       />
+
+      {loadError && <LoadError message={loadError} onRetry={loadProducts} />}
 
       <div className="mb-5 flex flex-wrap items-center gap-3">
         <form onSubmit={submitSearch} role="search" className="relative min-w-0 flex-1 sm:max-w-xs">
@@ -412,199 +305,15 @@ export function ProductsPage() {
         </div>
       )}
 
-      <Modal
-        open={form !== null}
+      <ProductFormModal
+        form={form}
+        onChange={setForm}
         onClose={() => setForm(null)}
-        title={form?.id ? `Edit ${form.name}` : 'Add product'}
-        description={form?.id ? 'Changes apply to the catalogue immediately.' : 'A new line for the shelf and the till.'}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setForm(null)}>
-              Cancel
-            </Button>
-            <Button variant="primary" loading={saving} onClick={submit}>
-              {form?.id ? 'Save changes' : 'Add product'}
-            </Button>
-          </>
-        }
-      >
-        {form && (
-          <form onSubmit={submit} className="space-y-4">
-            <TextField
-              label="Product name"
-              required
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. Red Onions"
-              autoFocus
-            />
-
-            <Segmented<PricingMode>
-              id="pricing-mode"
-              label="How is it sold?"
-              value={form.pricingMode}
-              onChange={(v) => setForm({ ...form, pricingMode: v })}
-              options={MODE_OPTIONS}
-              disabled={modeLocked}
-            />
-            {modeLocked && (
-              <p className="rounded-lg bg-warning-50 px-3 py-2 text-xs font-semibold text-warning-700">
-                This product has open stock on hand — close the open batches (Inventory → Stock batches)
-                before changing how it is sold or its base unit.
-              </p>
-            )}
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <SelectField
-                label="Category"
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value as Category })}
-                options={CATEGORY_OPTIONS}
-              />
-              <div>
-                <Segmented<Unit>
-                  id="base-unit"
-                  label="Base unit"
-                  value={form.baseUnit}
-                  onChange={(v) => setForm({ ...form, baseUnit: v })}
-                  options={UNIT_OPTIONS}
-                  disabled={unitLocked}
-                />
-                {form.pricingMode === 'counted' && (
-                  <p className="mt-1.5 text-xs leading-relaxed text-ink-500">
-                    Sold by count — pick <span className="font-semibold">piece</span> and each option's amount is the number of pieces it takes from stock.
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Price buttons — fixed prices on the till */}
-            <div className="space-y-2 rounded-xl border border-ink-200 p-3">
-              <div>
-                <p className="text-[13px] font-semibold text-ink-700">
-                  Price buttons <span className="font-medium text-ink-400">(optional for weighed)</span>
-                </p>
-                <p className="mt-0.5 text-xs leading-relaxed text-ink-500">
-                  {form.pricingMode === 'counted'
-                    ? 'Fixed prices the attendant taps — e.g. “1 @ KSh5”, “3 @ KSh10”. Each option’s amount is the stock it consumes (e.g. 3 pieces), so sales deduct exactly what was sold.'
-                    : 'Shortcuts for the till — e.g. “1/4 kg” at KSh40. The exact amount keeps cost/profit math accurate. Leave empty to sell at the flat rate above.'}
-                </p>
-              </div>
-
-              {form.buttons.length > 0 && (
-                <div className="space-y-2">
-                  {form.buttons.map((button, i) => (
-                    <div
-                      key={i}
-                      className={cn('grid grid-cols-1 gap-2 sm:items-end sm:grid-cols-[minmax(0,1fr)_6.5rem_6rem_2.5rem]')}
-                    >
-                      <TextField
-                        label={i === 0 ? 'Label' : undefined}
-                        placeholder={form.pricingMode === 'counted' ? 'e.g. “1 @ KSh5”' : 'e.g. “1/4 kg”'}
-                        value={button.label}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            buttons: form.buttons.map((t, j) => (j === i ? { ...t, label: e.target.value } : t)),
-                          })
-                        }
-                      />
-                      <TextField
-                        label={
-                          i === 0 ? (form.pricingMode === 'counted' ? 'Amount (pieces)' : `Amount (${form.baseUnit})`) : undefined
-                        }
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        inputMode="decimal"
-                        placeholder="0"
-                        value={button.kgAmount}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            buttons: form.buttons.map((t, j) => (j === i ? { ...t, kgAmount: e.target.value } : t)),
-                          })
-                        }
-                      />
-                      <TextField
-                        label={i === 0 ? 'Price (KES)' : undefined}
-                        type="number"
-                        min="0"
-                        step="0.5"
-                        inputMode="decimal"
-                        placeholder="0"
-                        value={button.price}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            buttons: form.buttons.map((t, j) => (j === i ? { ...t, price: e.target.value } : t)),
-                          })
-                        }
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setForm({ ...form, buttons: form.buttons.filter((_, j) => j !== i) })}
-                        aria-label={`Remove price button ${button.label || i + 1}`}
-                        className="flex h-10 w-10 items-center justify-center self-end justify-self-start rounded-lg border border-ink-200 text-ink-400 transition-colors hover:border-danger-200 hover:bg-danger-50 hover:text-danger-600 sm:justify-self-auto"
-                      >
-                        <X className="size-4" aria-hidden />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={() =>
-                  setForm({ ...form, buttons: [...form.buttons, { label: '', kgAmount: '', price: '' }] })
-                }
-                className="flex h-10 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-300 text-[13px] font-semibold text-ink-600 transition-colors hover:border-brand-500 hover:bg-brand-50 hover:text-brand-700"
-              >
-                <Plus className="size-4" aria-hidden />
-                Add price button
-              </button>
-            </div>
-
-            <div className={cn('grid gap-4', form.pricingMode === 'weighed' ? 'grid-cols-2' : 'grid-cols-1')}>
-              {form.pricingMode === 'weighed' && (
-                <TextField
-                  label="Selling price (KES)"
-                  required
-                  type="number"
-                  min="0"
-                  step="0.5"
-                  inputMode="decimal"
-                  value={form.sellPrice}
-                  onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
-                  placeholder="0"
-                />
-              )}
-              <TextField
-                label="Low-stock alert threshold"
-                required
-                type="number"
-                min="0"
-                step="0.5"
-                inputMode="decimal"
-                value={form.lowStockThreshold}
-                onChange={(e) => setForm({ ...form, lowStockThreshold: e.target.value })}
-                placeholder="0"
-              />
-            </div>
-            <p className="rounded-lg bg-ink-50 px-3 py-2 text-[13px] text-ink-500">
-              {form.pricingMode === 'counted'
-                ? 'Every option takes its exact amount from stock — record a batch under Inventory when a delivery arrives so cost and stock stay accurate.'
-                : 'Stock on hand is tracked through stock batches — record a new batch under Inventory when a delivery arrives.'}
-            </p>
-            {formError && (
-              <p className="rounded-lg bg-danger-50 px-3 py-2 text-[13px] font-semibold text-danger-700" role="alert">
-                {formError}
-              </p>
-            )}
-          </form>
-        )}
-      </Modal>
+        onSubmit={submit}
+        saving={saving}
+        error={formError}
+        locked={modeLocked}
+      />
     </div>
   )
 }

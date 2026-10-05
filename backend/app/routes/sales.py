@@ -21,42 +21,29 @@ pins this; it fails if price_charged ever becomes Numeric(10,2) or anything
 rounds before the money math completes.
 """
 import csv
+import logging
 from datetime import datetime, timezone
 from io import StringIO
 
 from flask import Blueprint, request, jsonify, Response
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
-from marshmallow import ValidationError
 
 from app.extensions import db
-from app.models.attendant import Attendant
-from app.models.product import Product, PricingMode
-from app.models.sale import Sale, SyncStatus
-from app.models.stock_batch import StockBatch, BatchStatus
-from app.schemas.sale_schema import SaleSchema, SaleSyncItemSchema
+from app.models.product import PricingMode
+from app.models.sale import Sale
+from app.schemas.sale_schema import SaleSchema
+from app.services.sale_sync import restore_to_batch, sync_one_line
 from app.utils.timezone import SHOP_TZ, business_day_bounds, db_ready_utc, today_shop_date
 from app.utils.unit_conversion import to_base_unit
+
+logger = logging.getLogger(__name__)
+
+# Upper bound on lines per /sync request — a till queue is a handful of carts.
+MAX_SYNC_ITEMS = 500
 
 sales_bp = Blueprint("sales", __name__)
 sale_schema = SaleSchema()
 sales_schema = SaleSchema(many=True)
-sync_item_schema = SaleSyncItemSchema()
-
-
-def _restore_to_batch(batch_id: int, qty_base: float) -> None:
-    """Put qty_base back on a batch (in base_unit), reopening it if it closed.
-
-    A batch that auto-closed when a sale emptied it must reopen so the
-    restored stock is sellable again — a closed batch's remaining stock is
-    invisible to FIFO and would be trapped.
-    """
-    batch = db.session.get(StockBatch, batch_id)
-    if batch is None:
-        return  # batch no longer exists — nothing to restore (shouldn't happen)
-    batch.quantity_remaining += qty_base
-    if batch.status == BatchStatus.closed:
-        batch.status = BatchStatus.open
-        batch.closed_at = None
 
 
 def _csv_safe(value) -> str:
@@ -69,79 +56,6 @@ def _csv_safe(value) -> str:
     """
     s = str(value) if value is not None else ""
     return "'" + s if s.startswith(("=", "+", "-", "@")) else s
-
-
-def _as_utc(dt: datetime) -> datetime:
-    """Normalize a datetime to timezone-aware UTC.
-
-    SQLite round-trips DateTime(timezone=True) as naive UTC, while marshmallow
-    parses client timestamps as aware datetimes — both sides must be aware
-    before subtraction, or Python raises TypeError (aware minus naive).
-    """
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _same_sale_payload(existing: Sale, data: dict) -> bool:
-    """True when the incoming line is a genuine retry of `existing`.
-
-    A retry re-sends the exact same business fields. If the uuid matches but
-    the content differs, it's a cross-device id collision — which the client
-    would otherwise treat as a successful 'duplicate' and permanently drop
-    the sale. Compare every money-relevant field plus a timestamp tolerance.
-    """
-    return (
-        existing.product_id == data["product_id"]
-        and existing.attendant_id == data["attendant_id"]
-        and abs(existing.quantity_sold - data["quantity_sold"]) < 1e-9
-        and existing.unit_sold_in == data["unit_sold_in"]
-        and abs(existing.price_charged - data["price_charged"]) < 1e-9
-        and abs((_as_utc(existing.created_at) - _as_utc(data["created_at"])).total_seconds()) < 2
-    )
-
-
-def _fifo_deduct(product: Product, qty_in_base_unit: float):
-    """
-    Deduct qty_in_base_unit from open batches FIFO.
-    Returns (cost_at_sale_per_base_unit, batch_used, allocations) or raises
-    ValueError if stock insufficient. `allocations` is the exact per-batch
-    breakdown of the deduction — the map a void needs to put each unit back
-    on the batch that actually supplied it.
-    """
-    open_batches = (
-        StockBatch.query
-        .filter_by(product_id=product.id, status=BatchStatus.open)
-        .order_by(StockBatch.date_received.asc())
-        .all()
-    )
-    total_available = sum(b.quantity_remaining for b in open_batches)
-    if total_available < qty_in_base_unit:
-        raise ValueError(
-            f"Insufficient stock: need {qty_in_base_unit:.4f} {product.base_unit.value}, "
-            f"only {total_available:.4f} available."
-        )
-
-    remaining_to_deduct = qty_in_base_unit
-    first_batch = None  # oldest batch that supplies cost_at_sale
-    weighted_cost_num = 0.0
-    allocations: list[dict] = []  # (batch_id, qty) in base_unit
-
-    for batch in open_batches:
-        if remaining_to_deduct <= 0:
-            break
-        deduct = min(batch.quantity_remaining, remaining_to_deduct)
-        if first_batch is None:
-            first_batch = batch
-        allocations.append({"batch_id": batch.id, "qty": deduct})
-        weighted_cost_num += deduct * batch.cost_per_base_unit
-        batch.quantity_remaining -= deduct
-        remaining_to_deduct -= deduct
-        batch.close_if_empty()
-
-    # Weighted average cost across all batches consumed
-    cost_per_base_unit = weighted_cost_num / qty_in_base_unit if qty_in_base_unit else 0
-    return cost_per_base_unit, first_batch, allocations
 
 
 @sales_bp.post("/sync")
@@ -158,194 +72,20 @@ def sync_sales():
 
     if not isinstance(raw_items, list):
         return jsonify({"error": "'sales' must be an array."}), 422
+    if len(raw_items) > MAX_SYNC_ITEMS:
+        return jsonify({"error": f"Too many lines — send at most {MAX_SYNC_ITEMS} per request."}), 422
 
-    results = []
     now = datetime.now(timezone.utc)
-    claims = get_jwt()
+    # Non-owner sessions may only record sales under their own identity.
+    is_owner = get_jwt().get("role") == "owner"
+    forced_attendant_id = None if is_owner else int(get_jwt_identity())
 
-    for raw in raw_items:
-        uuid = raw.get("client_uuid", "<unknown>")
-
-        # --- 1. Validate item schema ---
-        try:
-            data = sync_item_schema.load(raw)
-        except ValidationError as e:
-            results.append({"client_uuid": uuid, "status": "error", "reason": str(e.messages)})
-            continue
-
-        # --- 1b. Attribution trust boundary ---
-        # The PIN is verified at the till before checkout, but a client can
-        # still send an arbitrary attendant_id in the payload. An attendant's
-        # own session can only ever record sales under themselves — any
-        # payload attendant_id is ignored. Only the owner (who PIN-verifies
-        # the attendant at the till) may attribute a sale to a different
-        # attendant. The JWT identity is the authority, never the payload.
-        if claims.get("role") != "owner":
-            data["attendant_id"] = int(get_jwt_identity())
-
-        uuid = data["client_uuid"]
-
-        # --- 2. Idempotency check ---
-        existing = Sale.query.filter_by(client_uuid=uuid).first()
-        if existing:
-            if _same_sale_payload(existing, data):
-                # Genuine retry — safe to ack as a duplicate.
-                results.append({"client_uuid": uuid, "status": "duplicate", "sale_id": existing.id})
-            else:
-                # Same uuid, different content: a cross-device id collision.
-                # Surface it loudly instead of silently dropping the sale
-                # (the client treats 'duplicate' as success).
-                results.append({
-                    "client_uuid": uuid,
-                    "status": "error",
-                    "reason": "client_uuid already used by a different sale — offline sync conflict, ask the owner to check.",
-                })
-            continue
-
-        # --- 3. Validate product & attendant ---
-        product = db.session.get(Product, data["product_id"])
-        if not product:
-            results.append({"client_uuid": uuid, "status": "error", "reason": "Product not found."})
-            continue
-
-        attendant = db.session.get(Attendant, data["attendant_id"])
-        if not attendant or not attendant.active:
-            results.append({"client_uuid": uuid, "status": "error", "reason": "Attendant not found or inactive."})
-            continue
-
-        # A tracked counted option ("3 tomatoes" → amount 3) must consume
-        # exactly what it claims when sold in the base unit. The amount is
-        # what routes the line into FIFO; if it disagrees with quantity_sold
-        # the deduction would silently drift from the button the attendant
-        # pressed. Weighed portions and piece→kg conversions are unaffected
-        # (amount is only sent by counted options sold in their base unit).
-        amt = data.get("amount_in_base_unit")
-        if amt is not None and data["unit_sold_in"] == product.base_unit.value:
-            if abs(amt - data["quantity_sold"]) > 1e-6:
-                results.append({
-                    "client_uuid": uuid,
-                    "status": "error",
-                    "reason": "amount_in_base_unit does not match quantity_sold for this selling option — update the app or check the sale.",
-                })
-                continue
-
-        # --- 4/5/6. Costing depends on the product's pricing mode ---
-        # A counted product uses exact FIFO accounting only when its selling
-        # option carries a base-unit amount ("3 tomatoes" → amount_in_base_unit
-        # = 3, quantity_sold = 3 pieces). Counted lines without an amount are
-        # legacy untracked estimate sales and keep the old batch-P&L behavior
-        # (no deduction; cost/profit live at the batch level).
-        counted = product.pricing_mode == PricingMode.counted
-        tracked = not counted or data.get("amount_in_base_unit") is not None
-        allocations = None  # exact per-batch deduction map, for exact void restores
-        qty_base = None
-
-        if not tracked:
-            # Legacy counted (untracked estimate): the sale is logged at the
-            # button's fixed price (quantity_sold=1, price_charged = that price)
-            # against the OLDEST OPEN batch, so the batch's P&L
-            # (revenue_so_far - total_cost) stays correct. Nothing is deducted
-            # from quantity_remaining — the option has no amount, so there is
-            # no piece-level stock truth to deduct.
-            open_batch = (
-                StockBatch.query
-                .filter_by(product_id=product.id, status=BatchStatus.open)
-                .order_by(StockBatch.date_received.asc())
-                .first()
-            )
-            if open_batch is None:
-                results.append({
-                    "client_uuid": uuid,
-                    "status": "error",
-                    "reason": "No open batch for this product — record a new delivery first.",
-                })
-                continue
-            batch = open_batch
-            cost_at_sale = 0.0
-            profit = 0.0  # counted profit lives at the batch level
-        else:
-            # Tracked path — weighed products, and counted products whose
-            # selling option carries an exact base-unit amount. Identical FIFO
-            # accounting for both.
-            # --- Convert quantity to base_unit ---
-            try:
-                qty_base = to_base_unit(
-                    data["quantity_sold"],
-                    data["unit_sold_in"],
-                    product.base_unit.value,
-                    product.avg_piece_weight,
-                )
-            except ValueError as e:
-                results.append({"client_uuid": uuid, "status": "error", "reason": str(e)})
-                continue
-
-            # --- FIFO deduction + cost snapshot ---
-            try:
-                cost_per_base, batch, allocations = _fifo_deduct(product, qty_base)
-            except ValueError as e:
-                results.append({"client_uuid": uuid, "status": "error", "reason": str(e)})
-                continue
-
-            # --- Compute profit (snapshot) ---
-            # profit = (price_charged_per_unit - cost_per_unit_in_sold_unit) * qty_sold
-            # We store total profit for the line item.
-            # price_charged is already per unit_sold_in; cost_per_base is per base_unit.
-            # If unit_sold_in == base_unit, direct comparison. If piece→kg, normalise.
-            if data["unit_sold_in"] == product.base_unit.value:
-                cost_at_sale = cost_per_base  # per unit_sold_in
-            else:
-                # piece → kg: cost_at_sale per piece = cost_per_kg * avg_piece_weight
-                if data["unit_sold_in"] == "piece" and product.base_unit.value == "kg":
-                    cost_at_sale = cost_per_base * (product.avg_piece_weight or 1)
-                else:
-                    cost_at_sale = cost_per_base
-
-            profit = (data["price_charged"] - cost_at_sale) * data["quantity_sold"]
-
-        # --- 7. Persist ---
-        sale = Sale(
-            client_uuid=uuid,
-            product_id=product.id,
-            batch_id=batch.id,
-            attendant_id=attendant.id,
-            quantity_sold=data["quantity_sold"],
-            unit_sold_in=data["unit_sold_in"],
-            price_charged=data["price_charged"],
-            cost_at_sale=cost_at_sale,
-            profit=profit,
-            batch_allocations=allocations or None,
-            # Transaction grouping + historical snapshots, captured at sync time
-            sale_uuid=data.get("sale_uuid"),
-            product_name_snapshot=product.name,
-            button_label_snapshot=data.get("button_label"),
-            button_count_snapshot=data.get("count"),
-            quantity_base=qty_base,
-            sync_status=SyncStatus.synced,
-            created_at=data["created_at"],
-            synced_at=now,
-        )
-        db.session.add(sale)
-
-        try:
-            db.session.flush()  # get sale.id before committing the batch
-        except Exception as e:
-            db.session.rollback()
-            results.append({"client_uuid": uuid, "status": "error", "reason": str(e)})
-            continue
-
-        # Refresh product cost cache after batch changes
-        product.refresh_cost_cache()
-
-        results.append({"client_uuid": uuid, "status": "synced", "sale_id": sale.id})
-
-    # Commit everything that didn't individually fail
-    try:
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": f"Database commit failed: {e}"}), 500
-
+    results = [
+        sync_one_line(raw, forced_attendant_id=forced_attendant_id, now=now)
+        for raw in raw_items
+    ]
     return jsonify({"results": results}), 200
+
 
 
 @sales_bp.post("/<int:sale_id>/void")
@@ -392,7 +132,7 @@ def void_sale(sale_id: int):
                 # Exact FIFO restore: each unit goes back to the batch that
                 # supplied it — a single sale can span several batches.
                 for alloc in sale.batch_allocations:
-                    _restore_to_batch(alloc["batch_id"], alloc["qty"])
+                    restore_to_batch(alloc["batch_id"], alloc["qty"])
             else:
                 # Legacy sale (recorded before batch_allocations existed):
                 # restore everything to the recorded batch — exactly as this
@@ -410,7 +150,7 @@ def void_sale(sale_id: int):
                     )
                 else:
                     qty_base = sale.quantity_sold
-                _restore_to_batch(batch.id, qty_base)
+                restore_to_batch(batch.id, qty_base)
 
     sale.voided_at = datetime.now(timezone.utc)
     sale.voided_by = caller_id
@@ -643,6 +383,10 @@ def daily_summary():
     q = Sale.query
     if not include_voided:
         q = q.filter(Sale.voided_at.is_(None))
+
+    # Non-owners only ever see their own takings — the shop-wide total is owner data.
+    if claims.get("role") != "owner":
+        q = q.filter(Sale.attendant_id == int(get_jwt_identity()))
 
     sales = q.filter(
         Sale.created_at >= db_ready_utc(start_utc),

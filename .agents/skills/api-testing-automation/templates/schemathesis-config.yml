@@ -1,0 +1,137 @@
+# Schemathesis Configuration for Contract Testing
+# Place in tests/api/contract/schemathesis.yml
+
+# Base configuration
+base_url: "${API_BASE_URL:-http://localhost:3000}"
+
+# Schema location (OpenAPI/Swagger)
+schema:
+  path: "${API_SCHEMA_URL:-/openapi.json}"
+  # Or local file:
+  # path: "./openapi.json"
+
+# Authentication
+auth:
+  type: "bearer"
+  token: "${API_AUTH_TOKEN}"
+
+# Test generation settings
+generation:
+  # Number of test cases per endpoint per method
+  count: 100
+  
+  # Data generation strategy
+  data_generation_method: "positive"  # positive, negative, all
+  
+  # Custom field generators (regex patterns)
+  field_generators:
+    "email": "email"
+    "uuid": "uuid"
+    "date-time": "datetime"
+    "phone": "^\\+?[1-9]\\d{1,14}$"
+
+# Checks to run
+checks:
+  - "not_a_server_error"      # No 5xx responses
+  - "status_code_conformance" # Response matches schema
+  - "content_type_conformance" # Content-Type matches schema
+  - "response_schema_conformance" # Body matches schema
+  - "response_headers_conformance" # Headers match schema
+  - "negative_data_rejection" # Invalid input rejected (4xx)
+  - "positive_data_acceptance" # Valid input accepted (2xx)
+  
+  # Security checks
+  - "sql_injection"
+  - "xss"
+  - "path_traversal"
+  - "command_injection"
+  - "xxe"
+
+# Target endpoints (include/exclude patterns)
+targets:
+  include:
+    - "/api/**"
+    - "/auth/**"
+  exclude:
+    - "/health"
+    - "/metrics"
+    - "/ready"
+
+# Request configuration
+request:
+  timeout: 30  # seconds
+  verify_tls: true
+  follow_redirects: false
+  
+  # Headers added to all requests
+  headers:
+    "X-Test-Run": "schemathesis"
+    "User-Agent": "API-Contract-Test/1.0"
+
+# Rate limiting (be nice to the API)
+rate_limit:
+  requests_per_second: 10
+  burst: 20
+
+# Output configuration
+output:
+  # JUnit XML for CI integration
+  junit: "test-results/schemathesis-junit.xml"
+  
+  # Detailed JSON report
+  json: "test-results/schemathesis-report.json"
+  
+  # HTML report
+  html: "test-results/schemathesis-report.html"
+  
+  # Verbose console output
+  verbose: true
+
+# State management (for stateful APIs)
+stateful:
+  enabled: false
+  # Links between operations (e.g., POST /users -> GET /users/{id})
+  # links:
+  #   - source: "POST /api/users"
+  #     target: "GET /api/users/{id}"
+  #     field: "id"
+
+# CI/CD integration
+ci:
+  # Fail on any check failure
+  fail_fast: false
+  
+  # Maximum failures before stopping
+  max_failures: 50
+  
+  # Exit codes
+  # 0 = all passed
+  # 1 = checks failed
+  # 2 = internal error
+  
+  # Baseline comparison (compare with previous run)
+  baseline: "previous"  # or path to baseline file
+
+# Hooks for custom logic
+hooks:
+  # Before each test case
+  # before_case: "tests/api/contract/hooks.py::before_case"
+  
+  # After each test case
+  # after_case: "tests/api/contract/hooks.py::after_case"
+  
+  # Filter generated cases
+  # filter_case: "tests/api/contract/hooks.py::filter_case"
+
+# Example hook file (tests/api/contract/hooks.py):
+# def before_case(case, context):
+#     # Add dynamic data
+#     if case.path == "/api/users" and case.method == "POST":
+#         case.body["email"] = f"test-{uuid.uuid4()}@example.com"
+#     return case
+#
+# def filter_case(case):
+#     # Skip certain cases
+#     if "admin" in case.path and case.method == "DELETE":
+#         return False
+#     return True

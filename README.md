@@ -62,7 +62,7 @@ This document is the complete reference for the system as it exists today. For t
 
 **Backend** (`backend/`) — Flask 3 app factory, Flask-SQLAlchemy, Flask-Migrate (Alembic), Flask-JWT-Extended, Flask-Cors, marshmallow (+ marshmallow-sqlalchemy), bcrypt (PIN hashing), python-dotenv. Served with gunicorn; `psycopg2-binary` for PostgreSQL.
 
-**Database** — SQLite for development (`backend/sokomtaani_dev.db`), PostgreSQL in production (via `DATABASE_URL`).
+**Database** — SQLite for development (`backend/sokomtaani_dev.db`), PostgreSQL in production via [Neon](https://neon.tech) (`DATABASE_URL` pooled, `DATABASE_URL_UNPOOLED` direct for migrations).
 
 **Hosting** — Frontend on Vercel; backend on Render. `vercel.json` rewrites `/api/*` to the Render backend and serves the SPA.
 
@@ -151,7 +151,8 @@ All settings live in `backend/config.py`, driven by environment variables (`.env
 | Variable | Default | Notes |
 |---|---|---|
 | `FLASK_ENV` | `development` | `development` → SQLite, `production` → PostgreSQL |
-| `DATABASE_URL` | `sqlite:///backend/sokomtaani_dev.db` | PostgreSQL URI in production (`postgres://` is auto-upgraded to `postgresql://`) |
+| `DATABASE_URL` | `sqlite:///backend/sokomtaani_dev.db` | PostgreSQL URI in production (`postgres://` is auto-upgraded to `postgresql://`). Pooled (PgBouncer) URL on Neon. |
+| `DATABASE_URL_UNPOOLED` | — | Direct (non-pooled) URL for Alembic migrations and `pg_dump`/`pg_restore`. DDL must not go through PgBouncer. |
 | `SECRET_KEY` | dev fallback | **Required in production** — `create_app("production")` raises if unset |
 | `JWT_SECRET_KEY` | dev fallback | **Required in production** — same fail-fast guard |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated list |
@@ -372,7 +373,7 @@ All 43 pass (verified). The `test_timezone.py` series test was made date-relativ
 ## Deployment
 
 ### Backend (Render / any gunicorn host)
-1. Set env vars: `FLASK_ENV=production`, `DATABASE_URL` (PostgreSQL), `SECRET_KEY`, `JWT_SECRET_KEY`, `CORS_ORIGINS` (the frontend origin). Production **refuses to start** if the secrets are missing.
+1. Set env vars: `FLASK_ENV=production`, `DATABASE_URL` (Neon PostgreSQL), `DATABASE_URL_UNPOOLED` (direct Neon URL for migrations), `SECRET_KEY`, `JWT_SECRET_KEY`, `CORS_ORIGINS` (the frontend origin). Production **refuses to start** if the secrets are missing.
 2. Run: `gunicorn "app:create_app('production')"` from `backend/`.
 3. Apply migrations: `flask db upgrade`.
 

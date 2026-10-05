@@ -12,7 +12,8 @@ def create_app(env: str = "development") -> Flask:
     app = Flask(__name__)
     app.config.from_object(config[env])
 
-    # Fail fast: production must never run on the public development secrets.
+    # Fail fast: production must never run on the public development secrets
+    # or without a real database.
     if env == "production":
         missing = [k for k in ("SECRET_KEY", "JWT_SECRET_KEY") if not os.getenv(k)]
         if missing:
@@ -21,6 +22,8 @@ def create_app(env: str = "development") -> Flask:
                 + ", ".join(missing)
                 + ". Refusing to start with development fallback secrets."
             )
+        if not os.getenv("DATABASE_URL"):
+            raise RuntimeError("DATABASE_URL is required in production")
 
     # ---------- Extensions ----------
     db.init_app(app)
@@ -29,8 +32,15 @@ def create_app(env: str = "development") -> Flask:
     cors.init_app(
         app,
         resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
-        supports_credentials=True,
     )
+
+    @jwt.token_in_blocklist_loader
+    def _is_attendant_revoked(_header, payload) -> bool:
+        """Treat tokens of deleted/deactivated attendants as revoked."""
+        from app.models.attendant import Attendant
+
+        attendant = db.session.get(Attendant, int(payload["sub"]))
+        return attendant is None or not attendant.active
 
     # ---------- Import models so Migrate can detect them ----------
     from app.models import (  # noqa: F401

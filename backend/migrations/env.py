@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from flask import current_app
 
 from alembic import context
+from sqlalchemy import create_engine
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -30,6 +31,24 @@ def get_engine_url():
             '%', '%%')
     except AttributeError:
         return str(get_engine().url).replace('%', '%%')
+
+
+def get_url():
+    """Prefer MIGRATION_DATABASE_URI (direct Neon URL) for DDL.
+
+    PgBouncer in transaction mode breaks DDL, so migrations must use the
+    direct (unpooled) endpoint.  Falls back to the engine URL when no
+    direct URL is configured (e.g. SQLite in development).  The returned
+    URL is suitable for context.configure() / create_engine() without
+    any % escaping.
+    """
+    direct_url = current_app.config.get("MIGRATION_DATABASE_URI")
+    if direct_url:
+        return str(direct_url)
+    try:
+        return get_engine().url.render_as_string(hide_password=False)
+    except AttributeError:
+        return str(get_engine().url)
 
 
 # add your model's MetaData object here
@@ -63,7 +82,7 @@ def run_migrations_offline():
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_url()
     context.configure(
         url=url, target_metadata=get_metadata(), literal_binds=True
     )
@@ -94,7 +113,10 @@ def run_migrations_online():
     if conf_args.get("process_revision_directives") is None:
         conf_args["process_revision_directives"] = process_revision_directives
 
-    connectable = get_engine()
+    url = get_url()
+    # Create a dedicated engine from the migration URL (direct endpoint).
+    # This avoids PgBouncer transaction-mode issues with DDL.
+    connectable = create_engine(url, pool_pre_ping=True)
 
     with connectable.connect() as connection:
         context.configure(

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from 'react'
+import { MotionConfig } from 'motion/react'
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { AppShell } from './components/layout/AppShell'
 import { RequireOwner } from './components/layout/RequireOwner'
@@ -6,6 +7,7 @@ import { Skeleton } from './components/ui/EmptyState'
 import LoginPage from './pages/LoginPage'
 import { isLoggedIn, logout, getStoredUser, isOwner } from './lib/auth'
 import type { ApiAttendant } from './lib/api'
+import { defaultTransition } from './lib/motion'
 
 const PosPage = lazy(() => import('./pages/PosPage').then((m) => ({ default: m.PosPage })))
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })))
@@ -56,7 +58,8 @@ export default function App() {
   }
 
   return (
-    <Routes>
+    <MotionConfig transition={defaultTransition}>
+      <Routes>
       <Route
         path="/pos"
         element={
@@ -126,6 +129,7 @@ export default function App() {
         />
       </Route>
       <Route path="*" element={<HomeRoute />} />
-    </Routes>
+      </Routes>
+    </MotionConfig>
   )
 }
