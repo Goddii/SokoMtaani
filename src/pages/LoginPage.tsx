@@ -6,6 +6,7 @@ import { login } from '../lib/auth'
 import type { ApiAttendant } from '../lib/api'
 import { Button } from '../components/ui/Button'
 import { StatusPill } from '../components/ui/Card'
+import { FallingText } from '../components/ui/FallingText'
 import { staggerDelay, easing } from '../lib/motion'
 
 interface LoginPageProps {
@@ -174,6 +175,17 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
         animate="visible"
       >
         <div className="w-full max-w-sm">
+          {/* Falling welcome text */}
+          <motion.div
+            className="text-center mb-4"
+            variants={formItemVariants}
+          >
+            <FallingText
+              text="Welcome back to your dashboard"
+              className="text-sm font-medium text-ink-500"
+            />
+          </motion.div>
+
           {/* Header */}
           <motion.div
             className="mb-1 text-center"
