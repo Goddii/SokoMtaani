@@ -12,7 +12,8 @@ def create_app(env: str = "development") -> Flask:
     app = Flask(__name__)
     app.config.from_object(config[env])
 
-    # Fail fast: production must never run on the public development secrets.
+    # Fail fast: production must never run on the public development secrets
+    # or without a real database.
     if env == "production":
         missing = [k for k in ("SECRET_KEY", "JWT_SECRET_KEY") if not os.getenv(k)]
         if missing:
@@ -21,6 +22,8 @@ def create_app(env: str = "development") -> Flask:
                 + ", ".join(missing)
                 + ". Refusing to start with development fallback secrets."
             )
+        if not os.getenv("DATABASE_URL"):
+            raise RuntimeError("DATABASE_URL is required in production")
 
     # ---------- Extensions ----------
     db.init_app(app)
